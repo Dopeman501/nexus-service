@@ -5,6 +5,7 @@ using System.Net.Http.Json;
 using Microsoft.Extensions.DependencyInjection;
 using Nexus.Service.Auth;
 using Nexus.Service.Models.Panel;
+using Nexus.Service.Panel;
 
 namespace Nexus.Service.Tests.Integration;
 
@@ -55,5 +56,51 @@ public sealed class PanelStarterLayoutRouteTests : IDisposable
 
         Assert.NotEmpty(first);
         Assert.Equal(first, second);
+    }
+
+    [Fact]
+    public async Task Host_created_portrait_record_has_one_clock_and_stable_widget_ids()
+    {
+        var client = Client();
+        var registry = _factory.Services.GetRequiredService<PanelDeviceRegistry>();
+        var record = registry.Allocate("Jungle Leopard D215", new PanelDeviceCapabilities
+        {
+            Surface = "lcd-portrait", Family = "jungle-leopard-d215", CssWidth = 756, CssHeight = 1680, Dpr = 1,
+        }, canReuse: _ => false);
+
+        var returned = await client.GetFromJsonAsync<PanelDeviceRecord>($"/panel/devices/{record.Id}");
+        var layout = Assert.IsType<PanelLayoutDto>(returned?.Layout);
+        Assert.Equal("lcd-portrait", layout.Surface);
+        var clock = Assert.Single(Assert.Single(layout.Pages).Widgets);
+        Assert.Equal("clock", clock.Type);
+        Assert.Equal("2x4", clock.Size);
+        Assert.Equal(new[] { layout.Pages[0].Id, clock.Id }, await IdsAsync(client, record.Id));
+    }
+
+    [Fact]
+    public async Task Clients_cannot_allocate_or_modify_the_host_owned_portrait_capabilities()
+    {
+        var client = Client();
+        var capabilities = new PanelDeviceCapabilities { Surface = "lcd-portrait", Family = "jungle-leopard-d215", CssWidth = 756, CssHeight = 1680 };
+        var created = await client.PostAsJsonAsync("/panel/devices", new PanelDeviceCreateBody { Capabilities = capabilities });
+        Assert.Equal(HttpStatusCode.BadRequest, created.StatusCode);
+
+        var registry = _factory.Services.GetRequiredService<PanelDeviceRegistry>();
+        var portrait = registry.Allocate("Jungle Leopard D215", capabilities, canReuse: _ => false);
+        var other = registry.Allocate("Unrelated display", new PanelDeviceCapabilities { Surface = "lcd-wide" });
+
+        var patch = await client.PostAsJsonAsync($"/panel/devices/{portrait.Id}", new PanelDevicePatch
+        {
+            Capabilities = new PanelDeviceCapabilities { Surface = "lcd-wide", CssWidth = 1200 },
+        });
+        Assert.Equal(HttpStatusCode.BadRequest, patch.StatusCode);
+        Assert.Equal(756, registry.Get(portrait.Id)?.Capabilities?.CssWidth);
+
+        var claim = await client.PostAsJsonAsync($"/panel/devices/{other.Id}", new PanelDevicePatch { Capabilities = capabilities });
+        Assert.Equal(HttpStatusCode.BadRequest, claim.StatusCode);
+
+        var theme = await client.PostAsJsonAsync($"/panel/devices/{portrait.Id}", new PanelDevicePatch { ThemeMode = "dark" });
+        Assert.Equal(HttpStatusCode.OK, theme.StatusCode);
+        Assert.Equal("dark", registry.Get(portrait.Id)?.ThemeMode);
     }
 }

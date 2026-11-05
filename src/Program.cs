@@ -748,6 +748,7 @@ app.MapTransferEndpoints();
 app.MapProfileEndpoints();
 app.MapDashboardPresetEndpoints();
 app.MapPanelEndpoints();
+app.MapD215BrightnessEndpoints();
 app.MapSentryEndpoints();
 app.MapPanelDeckEndpoints();
 app.MapStreamedPanelEndpoints();
@@ -1023,6 +1024,18 @@ static void FastServiceShutdown(WebApplication app)
             catch { }
         }),
         lightsOff,
+        Task.Run(async () =>
+        {
+            try
+            {
+                if (sp.GetService<Nexus.Service.Peripherals.JungleLeopard.D215ConnectionWorker>() is { } d215)
+                    await d215.StopAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Nexus.Service.Platform.ServiceLog.Error($"[jungle-leopard-d215] shutdown failed ({ex.GetType().Name})");
+            }
+        }),
         Task.Run(() => { try { sp.GetService<Nexus.Service.Peripherals.StreamDeck.StreamDeckConnectionWorker>()?.ResetConnectedSurfacesForShutdown(); } catch { } }),
         Task.Run(() => { try { sp.GetService<Nexus.Service.Peripherals.Nollie.NollieConnectionWorker>()?.ReleaseAllForShutdown(); } catch { } }),
         Task.Run(() => { try { sp.GetService<Nexus.Service.Peripherals.BulkPanels.HydroShift2CurvePlayer>()?.ReleaseForShutdown(); } catch { } }),
@@ -1078,19 +1091,12 @@ static void ReleaseCorsairLinkLcd(IServiceProvider sp)
 // directly and ask the helper to exit, briefly.
 static void FastWindowsUiTeardown(IServiceProvider sp)
 {
-    // Stop() latches the no-respawn flag, but it reaps the overlay by a PID file
-    // that the flaky cross-session schtasks spawn doesn't always write in time,
-    // so also reap any nexus-overlay by image name.
-    try { sp.GetService<Nexus.Service.Panel.PanelOverlayHostLauncher>()?.Stop(); } catch { }
-    try
-    {
-        foreach (var p in System.Diagnostics.Process.GetProcessesByName("nexus-overlay"))
-        {
-            try { p.Kill(entireProcessTree: true); } catch { }
-            try { p.Dispose(); } catch { }
-        }
-    }
-    catch { }
+    // Prevent the supervisor from relaunching the overlay, then reap again
+    // after the helper disconnects in case a tray launch was already in flight.
+    // Both sweeps share an exit-wait budget within the fast teardown cap.
+    var elapsed = System.Diagnostics.Stopwatch.StartNew();
+    var overlay = sp.GetService<Nexus.Service.Panel.PanelOverlayHostLauncher>();
+    try { overlay?.Stop(elapsed); } catch { }
     try
     {
         var registry = sp.GetService<Nexus.Service.Helper.HelperRegistry>();
@@ -1102,6 +1108,7 @@ static void FastWindowsUiTeardown(IServiceProvider sp)
         }
     }
     catch { }
+    try { overlay?.Stop(elapsed); } catch { }
 }
 #endif
 

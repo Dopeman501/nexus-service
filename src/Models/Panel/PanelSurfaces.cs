@@ -39,6 +39,9 @@ public static class PanelSurfaces
     /// </summary>
     public const string LcdWide = "lcd-wide";
 
+    /// <summary>Portrait streamed glass with one 2x4 widget, keyed by its verified device identity.</summary>
+    public const string LcdPortrait = "lcd-portrait";
+
     /// <summary>
     /// Surfaces that are exactly one physical panel per host. They self-register
     /// over <c>POST /panel/devices</c> (no OS displayId to key on) and rely on

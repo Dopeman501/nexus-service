@@ -7,6 +7,7 @@ using Nexus.Service.Discord;
 using Nexus.Service.Fps;
 #if WINDOWS
 using Nexus.Service.Helper;
+using Nexus.Service.Peripherals.JungleLeopard;
 #endif
 using Nexus.Service.Lifecycle;
 using Nexus.Service.Lighting;
@@ -840,6 +841,15 @@ public static class NexusServiceCollectionExtensions
 
     public static IServiceCollection AddNexusDevices(this IServiceCollection services)
     {
+#if WINDOWS
+        services.AddSingleton<ID215PortDiscovery, WindowsD215PortDiscovery>();
+        services.AddSingleton(sp => new D215ConnectionWorker(sp.GetRequiredService<ID215PortDiscovery>(),
+            sp.GetRequiredService<DeviceControlGate>(), WindowsD215SerialTransport.OpenAsync, TimeProvider.System,
+            D215Timing.Default, D215ConnectionWorker.DefaultPollInterval));
+        services.AddHostedService(sp => sp.GetRequiredService<D215ConnectionWorker>());
+        services.AddSingleton<IDeviceHandler, Nexus.Service.Devices.Handlers.JungleLeopardD215Handler>();
+        services.AddSingleton<Nexus.Service.Panel.Streams.IStreamedPanelDiscovery, D215PanelDiscovery>();
+#endif
         // CNVS hub: serial-port discovery + hub singleton + connection
         // worker that grabs COM7 at startup before OpenRGB-headless can
         // claim it (whoever opens the COM port first wins on Windows

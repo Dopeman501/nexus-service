@@ -6,6 +6,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Threading;
+using Nexus.Service.Lifecycle;
 
 namespace Nexus.Service.Panel;
 
@@ -28,8 +29,8 @@ public sealed class PanelOverlayHostLauncher : IOverlayHost
     private Process? _process;
     private readonly IntPtr _jobHandle = IntPtr.Zero;
     private readonly object _lock = new();
-    /// <summary>Stop() sets this so an in-flight spawn does not adopt the process it started. Re-armed by the next Start().</summary>
-    private volatile bool _stopRequested;
+    // Windows Stop is terminal. Do not let a supervisor wake during host shutdown start another overlay.
+    private bool _stopRequested;
     /// <summary>
     /// True while a background spawn is in flight. We dispatch the
     /// schtasks dance to a Task so the HTTP request that triggered the
@@ -42,14 +43,17 @@ public sealed class PanelOverlayHostLauncher : IOverlayHost
     private bool _waitingForLogon;
     private bool _missingHostLogged;
     private static bool _oobeStartFailureLogged;
-    /// <summary>Bumped by every Stop so an in-flight spawn abandons the process it started instead of adopting it.</summary>
-    private int _spawnGeneration;
-    private static readonly string PidFilePath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
-        "Nexus", "panel-desktop-pid.txt");
+    private readonly string? _hostPath;
+    private readonly string _pidFilePath;
+    private static string DefaultPidFilePath => Path.Combine(
+        Nexus.Service.Persistence.NexusDataPaths.NexusRoot(), "panel-desktop-pid.txt");
 
-    public PanelOverlayHostLauncher()
+    public PanelOverlayHostLauncher() : this(ResolveHostPath(), DefaultPidFilePath) { }
+
+    internal PanelOverlayHostLauncher(string? hostPath, string pidFilePath)
     {
+        _hostPath = hostPath;
+        _pidFilePath = pidFilePath;
         // Create a Windows Job Object with KILL_ON_JOB_CLOSE so any
         // child we assign to it is killed when this handle closes - i.e.
         // when the service process exits, including via taskkill /F or
@@ -100,7 +104,7 @@ public sealed class PanelOverlayHostLauncher : IOverlayHost
         if (!OperatingSystem.IsWindows()) return false;
         if (IsRunning) return true;
 
-        var hostPath = ResolveHostPath();
+        var hostPath = _hostPath;
         if (hostPath is null || !File.Exists(hostPath))
         {
             if (!_missingHostLogged)
@@ -119,26 +123,25 @@ public sealed class PanelOverlayHostLauncher : IOverlayHost
         }
         _waitingForLogon = false;
 
-        int generation;
         lock (_lock)
         {
+            if (_stopRequested) return false;
             if (_starting) return true;
             _starting = true;
-            _stopRequested = false;
-            generation = _spawnGeneration;
         }
         _ = System.Threading.Tasks.Task.Run(() =>
         {
-            if (OperatingSystem.IsWindows()) SpawnHostBlocking(hostPath, generation);
+            if (OperatingSystem.IsWindows()) SpawnHostBlocking(hostPath);
         });
         return true;
     }
 
     [SupportedOSPlatform("windows")]
-    private void SpawnHostBlocking(string hostPath, int generation)
+    private void SpawnHostBlocking(string hostPath)
     {
         try
         {
+            lock (_lock) { if (_stopRequested) return; }
             var workingDir = Path.GetDirectoryName(hostPath)!;
             var proc = System.Security.Principal.WindowsIdentity.GetCurrent().IsSystem
                 ? StartInActiveUserSession(hostPath, workingDir)
@@ -152,7 +155,7 @@ public sealed class PanelOverlayHostLauncher : IOverlayHost
             if (proc is null) return;
             lock (_lock)
             {
-                if (_stopRequested || generation != _spawnGeneration)
+                if (_stopRequested)
                 {
                     try { if (!proc.HasExited) proc.Kill(entireProcessTree: true); } catch { }
                     try { proc.Dispose(); } catch { }
@@ -176,45 +179,39 @@ public sealed class PanelOverlayHostLauncher : IOverlayHost
         }
         finally
         {
-            lock (_lock) { if (generation == _spawnGeneration) _starting = false; }
+            _starting = false;
         }
     }
 
-    public void Stop()
+    public void Stop() => Stop(Stopwatch.StartNew());
+
+    internal void Stop(Stopwatch elapsed)
     {
-        _stopRequested = true;
+        Process? proc;
         lock (_lock)
         {
-            _spawnGeneration++;
-            _starting = false;
+            _stopRequested = true;
+            proc = _process;
+            _process = null;
         }
-        var proc = _process;
-        _process = null;
         if (proc is not null)
         {
-            try { proc.Exited -= OnExited; } catch { }
-            try
+            using (proc)
             {
-                if (!proc.HasExited)
-                {
-                    proc.Kill(entireProcessTree: true);
-                }
+                proc.Exited -= OnExited;
+                StopHost(proc, elapsed);
             }
-            catch (Exception ex)
-            {
-                // Access denied / process already gone / job-object death
-                // races us. Log so a leaked host shows up in service logs
-                // and the next reconcile pass can deal with it.
-                Console.Error.WriteLine($"[overlay-host] kill failed: {ex.Message}");
-            }
-            try { proc.Dispose(); } catch { }
         }
-        // The in-memory handle is null after a crash-respawn cycle or when a
-        // prior service instance spawned the live host, so also kill whatever
-        // PID we last tracked - shutdown must reliably reap nexus-overlay.exe,
-        // not just the host this instance happens to hold a Process for.
-        KillTrackedHost();
-        try { DeletePidFile(); } catch { }
+        // The tray and --open-app can start the singleton without our Process
+        // handle or a PID file. Match the full image path before stopping it.
+        if (OperatingSystem.IsWindows() && _hostPath is not null)
+        {
+            foreach (var candidate in Process.GetProcessesByName("nexus-overlay"))
+            {
+                using (candidate) StopPackageHost(candidate, _hostPath, elapsed);
+            }
+        }
+        DeletePidFile(_pidFilePath);
     }
 
     /// <summary>
@@ -224,33 +221,62 @@ public sealed class PanelOverlayHostLauncher : IOverlayHost
     /// </summary>
     public static void CleanupOrphans()
     {
-        KillTrackedHost();
-        try { DeletePidFile(); } catch { }
-        if (OperatingSystem.IsWindows()) Nexus.Service.Lifecycle.OobeSessionLaunch.ReapLeftovers();
+        var pidFilePath = DefaultPidFilePath;
+        if (OperatingSystem.IsWindows())
+        {
+            KillTrackedHost(pidFilePath, ResolveHostPath());
+            OobeSessionLaunch.ReapLeftovers();
+        }
+        DeletePidFile(pidFilePath);
     }
 
     /// <summary>
     /// Kill the nexus-overlay.exe recorded in the PID file if it is still
-    /// alive. The ProcessName guard rejects a recycled PID. Shared by the
-    /// startup orphan sweep and shutdown; the PID file is deleted by the
-    /// callers, not here.
+    /// alive and belongs to this package. A stale PID may have been reused.
     /// </summary>
-    private static void KillTrackedHost()
+    private static void KillTrackedHost(string pidFilePath, string? hostPath)
     {
         try
         {
-            if (!File.Exists(PidFilePath)) return;
-            var text = File.ReadAllText(PidFilePath).Trim();
+            if (hostPath is null || !File.Exists(pidFilePath)) return;
+            var text = File.ReadAllText(pidFilePath).Trim();
             if (!int.TryParse(text, out var pid)) return;
-            var proc = Process.GetProcessById(pid);
-            if (proc.ProcessName.Contains("nexus-overlay", StringComparison.OrdinalIgnoreCase))
-            {
-                proc.Kill(entireProcessTree: true);
-                Console.WriteLine($"[overlay-host] killed tracked host (pid {pid})");
-            }
-            proc.Dispose();
+            using var proc = Process.GetProcessById(pid);
+            StopPackageHost(proc, hostPath, Stopwatch.StartNew());
         }
         catch { /* no pid file / already gone / recycled pid */ }
+    }
+
+    private static void StopPackageHost(Process proc, string hostPath, Stopwatch elapsed)
+    {
+        try
+        {
+            // Keep the process object pinned while checking the image and stopping it.
+            _ = proc.SafeHandle;
+            if (IsPackageHost(proc, hostPath)) StopHost(proc, elapsed);
+        }
+        catch (InvalidOperationException) { /* Process exited during enumeration. */ }
+        catch (System.ComponentModel.Win32Exception ex)
+        {
+            Console.Error.WriteLine($"[overlay-host] could not inspect pid {proc.Id}: {ex.Message}");
+        }
+    }
+
+    private static bool IsPackageHost(Process proc, string hostPath) =>
+        OwnNexusExe.IsOwn(OwnNexusExe.ImagePathOf(proc.Id), [hostPath]);
+
+    private static void StopHost(Process proc, Stopwatch elapsed)
+    {
+        try
+        {
+            if (proc.HasExited) return;
+            proc.Kill(entireProcessTree: true);
+            var remainingMs = Math.Max(0, 750 - (int)elapsed.ElapsedMilliseconds);
+            if (proc.WaitForExit(remainingMs)) Console.WriteLine($"[overlay-host] stopped pid {proc.Id}");
+            else Console.Error.WriteLine($"[overlay-host] pid {proc.Id} did not exit within the shutdown budget");
+        }
+        catch (InvalidOperationException) { /* Process exited during shutdown. */ }
+        catch (Exception ex) { Console.Error.WriteLine($"[overlay-host] stop failed: {ex.Message}"); }
     }
 
     // -----------------------------------------------------------------------
@@ -327,8 +353,8 @@ public sealed class PanelOverlayHostLauncher : IOverlayHost
                 System.Threading.Thread.Sleep(100);
                 foreach (var p in Process.GetProcessesByName("nexus-overlay"))
                 {
-                    if (!before.Contains(p.Id)) { spawned = p; break; }
-                    p.Dispose();
+                    if (spawned is null && !before.Contains(p.Id) && IsPackageHost(p, exePath)) spawned = p;
+                    else p.Dispose();
                 }
             }
             if (spawned is null)
@@ -556,19 +582,19 @@ public sealed class PanelOverlayHostLauncher : IOverlayHost
         }
     }
 
-    private static void WritePidFile(int pid)
+    private void WritePidFile(int pid)
     {
         try
         {
-            Directory.CreateDirectory(Path.GetDirectoryName(PidFilePath)!);
-            File.WriteAllText(PidFilePath, pid.ToString());
+            Directory.CreateDirectory(Path.GetDirectoryName(_pidFilePath)!);
+            File.WriteAllText(_pidFilePath, pid.ToString());
         }
         catch { }
     }
 
-    private static void DeletePidFile()
+    private static void DeletePidFile(string pidFilePath)
     {
-        try { if (File.Exists(PidFilePath)) File.Delete(PidFilePath); } catch { }
+        try { File.Delete(pidFilePath); } catch { }
     }
 
     // ── Windows Job Object plumbing ──

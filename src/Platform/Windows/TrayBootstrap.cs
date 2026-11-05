@@ -491,11 +491,15 @@ internal static class TrayBootstrap
             catch (Exception ex) { Console.Error.WriteLine($"[helper-sync] {ex.Message}"); }
         };
 
-        helperRegistry.InboundEnvelope += (_, env) =>
+        helperRegistry.InboundEnvelope += (sender, env) =>
         {
             if (env.Type != "service.requestStop") return;
-            try { app.Lifetime.StopApplication(); }
-            catch (Exception ex) { Console.Error.WriteLine($"[helper-sync] requestStop failed: {ex.Message}"); }
+            // Shutdown waits for this connection to close. Keep its reader free to observe EOF.
+            _ = Task.Run(() =>
+            {
+                try { app.Lifetime.StopApplication(); }
+                catch (Exception ex) { Console.Error.WriteLine($"[helper-sync] requestStop failed: {ex.Message}"); }
+            });
         };
 
         helperRegistry.InboundEnvelope += (conn, env) =>

@@ -29,6 +29,70 @@ public sealed class StreamSessionTests
         Payload = new[] { marker },
     };
 
+    private static StreamSession NewRawSession(bool requireNative = false, bool keepLatest = false) => new(
+        "raw-session",
+        new StreamedPanelDeviceInfo
+        {
+            Serial = "raw-test",
+            Profile = new StreamedPanelProfile
+            {
+                Kind = "raw-test", DisplayName = "Raw Test", Surface = "monitor",
+                Codec = StreamCodec.RawBgra, CssWidth = 3, CssHeight = 3,
+                RequireNativeRawFrames = requireNative, KeepLatestRawFrame = keepLatest,
+            },
+        },
+        "raw-panel");
+
+    [Fact]
+    public void Native_raw_ingest_rejects_short_and_long_frames_and_releases_payloads()
+    {
+        var pool = new CountingPool();
+        var session = NewRawSession(requireNative: true);
+        // The overlay rounds each dimension to an even pixel count, so 3x3 renders as 2x2.
+        session.AcceptFrame(Pooled(pool, idr: true, length: 15));
+        session.AcceptFrame(Pooled(pool, idr: true, length: 17));
+
+        Assert.Equal(0, session.QueueDepthForTest);
+        Assert.Equal(2, pool.Returned);
+
+        session.AcceptFrame(Pooled(pool, idr: true, length: 16));
+        var frame = Assert.Single(session.DequeueForTick());
+        Assert.Equal(16, frame.Bytes.Length);
+        Assert.Equal(2, pool.Returned);
+        frame.Release();
+        Assert.Equal(3, pool.Returned);
+    }
+
+    [Fact]
+    public void Latest_raw_queue_replaces_and_releases_the_older_pending_frame()
+    {
+        var pool = new CountingPool();
+        var session = NewRawSession(requireNative: true, keepLatest: true);
+        var first = Pooled(pool, idr: true, length: 16);
+        var second = Pooled(pool, idr: true, length: 16);
+        session.AcceptFrame(first);
+        session.AcceptFrame(second);
+
+        Assert.Equal(1, session.QueueDepthForTest);
+        Assert.Equal(1, pool.Returned);
+        Assert.Equal(1, session.StatsSnapshot().Dropped);
+        Assert.Same(second, Assert.Single(session.DequeueForTick()));
+        second.Release();
+        Assert.Equal(2, pool.Returned);
+    }
+
+    [Fact]
+    public void Default_raw_queue_keeps_its_existing_two_frame_capacity()
+    {
+        var session = NewRawSession();
+        session.AcceptFrame(Frame(idr: true, marker: 1));
+        session.AcceptFrame(Frame(idr: true, marker: 2));
+
+        Assert.Equal(2, session.QueueDepthForTest);
+        Assert.Equal(1, Assert.Single(session.DequeueForTick()).Payload[0]);
+        Assert.Equal(2, Assert.Single(session.DequeueForTick()).Payload[0]);
+    }
+
     [Fact]
     public void New_session_waits_for_idr_and_skips_to_first_idr()
     {
@@ -178,14 +242,14 @@ public sealed class StreamSessionTests
         public override void Return(byte[] array, bool clearArray = false) { Returned++; _inner.Return(array, clearArray); }
     }
 
-    private static StreamFrame Pooled(CountingPool pool, bool idr)
+    private static StreamFrame Pooled(CountingPool pool, bool idr, int length = 8)
     {
-        var buf = pool.Rent(8);
+        var buf = pool.Rent(length);
         return new StreamFrame
         {
             Flags = idr ? StreamFraming.FlagIdr : (byte)0,
             Payload = buf,
-            Length = 8,
+            Length = length,
             Pooled = true,
             ReturnTo = pool,
         };

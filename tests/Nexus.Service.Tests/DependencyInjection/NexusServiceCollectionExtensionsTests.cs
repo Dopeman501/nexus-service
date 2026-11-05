@@ -3,6 +3,7 @@ using Nexus.Service.Activity;
 using Nexus.Service.Cooling;
 using Nexus.Service.DependencyInjection;
 using Nexus.Service.Devices;
+using Nexus.Service.Devices.Detection;
 using Nexus.Service.Lifecycle;
 using Nexus.Service.Lighting;
 using Nexus.Service.Persistence;
@@ -46,6 +47,8 @@ public class NexusServiceCollectionExtensionsTests
             .AddNexusHelper();
         services.AddLogging();
         services.AddHttpClient();
+        // These are offline graph checks. Idle hubs can coexist with real USB devices on the host.
+        services.AddSingleton<IUsbEnumerator, StubUsbEnumerator>();
         return services.BuildServiceProvider();
     }
 
@@ -113,8 +116,11 @@ public class NexusServiceCollectionExtensionsTests
         // Corsair XC7, Corsair Elite Capellix, ID-Cooling FX-LCD).
         // ... plus one BulkPanelHandler per bulk-pipe driver (Thermalright, Ryujin, Screen 8.8,
         // ZMatrices, HydroShift II, HydroShift II OLED Curved), plus the Glacial LCD and DeepCool Mystique handlers.
-        // ApexOled registers only where its streamed panel does (Windows and Linux).
-#if WINDOWS || LINUX
+        // ApexOled registers on Windows and Linux. The D215 COM handler is Windows-only.
+#if WINDOWS
+        const int platformHandlers = 2;
+        Assert.Single(handlers, handler => handler.Id == "jungle-leopard-d215");
+#elif LINUX
         const int platformHandlers = 1;
 #else
         const int platformHandlers = 0;

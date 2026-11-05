@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
+using Nexus.Service.Devices.Handlers;
 using Nexus.Service.Models.Panel;
 using Nexus.Service.Persistence;
 using Nexus.Service.Peripherals.Nzxt;
@@ -52,12 +53,14 @@ public sealed class PanelDeviceRegistry
         caps?.Family ?? (string.Equals(caps?.Surface, PanelSurfaces.LegacyKraken, StringComparison.Ordinal) ? KrakenHub.DeviceId : null);
 
     /// <summary>
-    /// The Kraken shares the lcd-round reuse pool with other round coolers but never swaps records with
-    /// them. Every other pairing of families reuses as it always has.
+    /// The D215 is keyed by verified serial, even on a shared surface. The Kraken shares the
+    /// lcd-round reuse pool with other round coolers but never swaps records with them.
     /// </summary>
     internal static bool CanShareRecord(PanelDeviceCapabilities? record, string? family)
     {
         var recordFamily = ReuseFamily(record);
+        if (recordFamily == JungleLeopardD215Handler.HandlerId || family == JungleLeopardD215Handler.HandlerId)
+            return false;
         var krakenId = KrakenHub.DeviceId;
         return (recordFamily != krakenId && family != krakenId)
             || string.Equals(recordFamily, family, StringComparison.Ordinal);
@@ -732,6 +735,10 @@ public sealed class PanelDeviceRegistry
         return snapshot;
     }
 
+    internal static bool IsHostOwnedD215(PanelDeviceCapabilities? capabilities) =>
+        capabilities?.Surface == PanelSurfaces.LcdPortrait
+        || capabilities?.Family == JungleLeopardD215Handler.HandlerId;
+
     public PanelDeviceRecord? Patch(string id, PanelDevicePatch patch)
     {
         if (string.IsNullOrWhiteSpace(id) || patch is null)
@@ -847,9 +854,9 @@ public sealed class PanelDeviceRegistry
                 record.Flip180 = patch.Flip180.Value;
             if (patch.Mirror.HasValue)
                 record.Mirror = patch.Mirror.Value;
-            // Same reasoning: a backlight belongs to the glass, and transports that
-            // cannot dim never read it.
-            if (patch.LcdBrightness.HasValue)
+            // The D215 accepts only direct, verified hardware changes. Keep a
+            // stale or internal patch from storing a setpoint during a remap.
+            if (patch.LcdBrightness.HasValue && !IsHostOwnedD215(record.Capabilities) && !IsHostOwnedD215(patch.Capabilities))
                 record.LcdBrightness = Math.Clamp(patch.LcdBrightness.Value, 0, 100);
             if (patch.SleepWhenLocked.HasValue)
                 record.SleepWhenLocked = patch.SleepWhenLocked.Value;

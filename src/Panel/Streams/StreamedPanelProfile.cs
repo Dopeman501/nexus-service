@@ -25,6 +25,8 @@ public enum StreamCodec
 /// </summary>
 public sealed record StreamedPanelProfile
 {
+    private readonly double _renderScale = 1.0;
+
     /// <summary>Stable id persisted as a per-serial override key.</summary>
     public required string Kind { get; init; }
 
@@ -88,10 +90,21 @@ public sealed record StreamedPanelProfile
     /// Fraction of the native resolution the overlay renders at; the ingest scales each frame
     /// back up to native. Below 1 it trades sharpness for render, capture and copy cost.
     /// </summary>
-    public double RenderScale { get; init; } = 1.0;
+    public double RenderScale
+    {
+        get => Codec == StreamCodec.RawBgra && RequireNativeRawFrames ? 1.0 : _renderScale;
+        init => _renderScale = value;
+    }
+
+    /// <summary>Render raw BGRA at native size and reject any differently sized ingest frame.</summary>
+    internal bool RequireNativeRawFrames { get; init; }
+
+    /// <summary>Limit the raw ingest queue to the newest complete frame.</summary>
+    internal bool KeepLatestRawFrame { get; init; }
 
     /// <summary>Only raw frames can be scaled back up before the device sees them.</summary>
-    public bool SupportsRenderScale => Codec == StreamCodec.RawBgra && Math.Max(CssWidth, CssHeight) > RenderScaleMinSide;
+    public bool SupportsRenderScale => Codec == StreamCodec.RawBgra && !RequireNativeRawFrames
+        && Math.Max(CssWidth, CssHeight) > RenderScaleMinSide;
 
     /// <summary>The overlay's frame length for a CSS length at a pixel ratio: its own even(round(css * dpr)).</summary>
     public static int FramePixels(int cssLength, double dpr) => Math.Max(2, (int)Math.Round(cssLength * dpr) & ~1);

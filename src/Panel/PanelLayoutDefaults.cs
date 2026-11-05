@@ -31,7 +31,7 @@ public static class PanelLayoutDefaults
             // landscape, large-canvas shape; no dedicated JSON entry needed.
             Models.Panel.PanelSurfaces.Monitor => layouts.Desktop,
             "phone" => layouts.Phone,
-            "q60" => layouts.Q60,
+            PanelSurfaces.Q60 or PanelSurfaces.LcdPortrait => layouts.Q60,
             _ => layouts.Y70,
         };
         return Build(src, surface);

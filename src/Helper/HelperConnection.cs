@@ -28,6 +28,7 @@ public sealed class HelperConnection : IAsyncDisposable
     private readonly SemaphoreSlim _writeLock = new(1, 1);
     private readonly ConcurrentDictionary<string, TaskCompletionSource<HelperResult>> _pending = new();
     private readonly CancellationTokenSource _cts = new();
+    private readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _disposed;
 
     public int SessionId { get; }
@@ -35,6 +36,7 @@ public sealed class HelperConnection : IAsyncDisposable
     public string Version { get; }
     public string DownloadsDir { get; }
     public DateTimeOffset ConnectedAt { get; } = DateTimeOffset.UtcNow;
+    internal Task Closed => _closed.Task;
 
     private HelperConnection(NamedPipeServerStream pipe, HelperRegistry registry, HelperHello hello)
     {
@@ -232,6 +234,7 @@ public sealed class HelperConnection : IAsyncDisposable
         // observe ObjectDisposedException before _cts.Cancel propagates.
         // The semaphore is per-connection and goes away with the GC.
         try { _cts.Dispose(); } catch { }
+        _closed.TrySetResult();
     }
 
     private static bool TryGetVerifiedSessionId(NamedPipeServerStream pipe, out int sessionId)

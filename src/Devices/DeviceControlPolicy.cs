@@ -97,7 +97,9 @@ public static class DeviceControlPolicy
     public static bool RequiresBeta(string handlerId) => !ExperimentalUnlocked && IsExperimental(handlerId);
 
     public static bool DefaultOn(string handlerId) =>
-        !ConflictAppByHandler.ContainsKey(handlerId)
+        // The D215's vendor app owns its single COM port until the user opts in.
+        !string.Equals(handlerId, Peripherals.JungleLeopard.D215ConnectionWorker.HandlerId, StringComparison.OrdinalIgnoreCase)
+        && !ConflictAppByHandler.ContainsKey(handlerId)
         && !UnverifiedHandlers.Contains(handlerId)
         && !(HintOnlyConflictAppByHandler.TryGetValue(handlerId, out var app)
             && Conflicts.ConflictWatcher.FindById(app)?.DefaultWhitelisted == true);

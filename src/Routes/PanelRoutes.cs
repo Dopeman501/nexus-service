@@ -1,5 +1,6 @@
 using System.IO;
 using Nexus.Service.Auth;
+using Nexus.Service.Devices.Handlers;
 using Nexus.Service.Models;
 using Nexus.Service.Models.Panel;
 using Nexus.Service.Panel;
@@ -327,6 +328,8 @@ public static class PanelRoutes
 
         app.MapPost("/panel/devices", (PanelDeviceCreateBody? body, PanelDeviceRegistry registry, MultiplexHub hub) =>
         {
+            if (PanelDeviceRegistry.IsHostOwnedD215(body?.Capabilities))
+                return Results.BadRequest(ApiResponse.Fail("D215 panel capabilities are set by the service"));
             var record = registry.Allocate(body?.DisplayName, body?.Capabilities);
             BroadcastDeviceChanged(hub, record.Id);
             return Results.Json(record, AppJsonContext.Default.PanelDeviceRecord);
@@ -359,6 +362,14 @@ public static class PanelRoutes
 
         app.MapPost("/panel/devices/{id}", (string id, PanelDevicePatch body, HttpContext ctx, PanelDeviceRegistry registry, MultiplexHub hub, TokenService tokens, Nexus.Service.Panel.Streams.StreamedPanelCoordinator streams, Nexus.Service.Deck.ListedAppIds listed, Nexus.Service.Telemetry.ITelemetry telemetry) =>
         {
+            var existing = body.Capabilities is not null || body.LcdBrightness.HasValue || body.Portrait.HasValue
+                ? registry.Get(id)
+                : null;
+            var hostOwnedD215 = PanelDeviceRegistry.IsHostOwnedD215(existing?.Capabilities);
+            if (body.Capabilities is { } caps && (PanelDeviceRegistry.IsHostOwnedD215(caps) || hostOwnedD215))
+                return Results.BadRequest(ApiResponse.Fail("D215 panel capabilities are set by the service"));
+            if (body.LcdBrightness.HasValue && hostOwnedD215)
+                return Results.BadRequest(ApiResponse.Fail("D215 brightness requires a confirmed hardware change"));
             // A panel session may rearrange or remove the deck keys it has, but
             // authoring a key that opens a file, sends a key chord, types text or
             // plays an audio file is desktop-only: PanelDeckRoutes executes those
@@ -384,13 +395,17 @@ public static class PanelRoutes
             if (body.LcdBrightness.HasValue)
                 streams.ApplyBrightness(updated.Id);
             if (body.SecondaryMonitor.HasValue)
-            {
                 streams.ApplySecondaryMonitor(updated.Id);
+            var updatesD215Orientation = hostOwnedD215 && body.Portrait.HasValue;
+            var targetSurface = body.Portrait == false ? PanelSurfaces.LcdWide : PanelSurfaces.LcdPortrait;
+            // The coordinator publishes the new geometry after replacing the active assignment.
+            // An earlier device event could remount the editor during that transition.
+            var deferDeviceChanged = updatesD215Orientation && updated.Capabilities?.Surface != targetSurface
+                && streams.FindActivePanelStream(id, JungleLeopardD215Handler.HandlerId) is not null;
+            if (body.SecondaryMonitor.HasValue || body.HighResolution.HasValue || body.FpsCap.HasValue || updatesD215Orientation)
                 streams.Wake();
-            }
-            if (body.HighResolution.HasValue || body.FpsCap.HasValue)
-                streams.Wake();
-            BroadcastDeviceChanged(hub, id);
+            if (!deferDeviceChanged)
+                BroadcastDeviceChanged(hub, id);
             if (body.Layout is not null)
                 Nexus.Service.Telemetry.AppLifecycleTelemetry.LayoutChanged(telemetry, layoutBefore, updated.Layout);
             return Results.Json(updated, AppJsonContext.Default.PanelDeviceRecord);

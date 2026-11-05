@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
+using Nexus.Service.Platform;
 
 namespace Nexus.Service.Panel.Streams;
 
@@ -22,6 +24,8 @@ public sealed class StreamSession
     private readonly object _lock = new();
     private readonly Queue<StreamFrame> _queue = new();
     private readonly int _maxQueuedFrames;
+    private readonly int? _requiredRawFrameBytes;
+    private int _loggedRawFrameSize;
     private long _enqueued;
     private long _sent;
     private long _dropped;
@@ -46,9 +50,15 @@ public sealed class StreamSession
         // Raw frames are every one a keyframe and megabytes each, and the device
         // is the ceiling: queueing them buys nothing but latency, so hold a single
         // frame of slack and let the trim keep the newest.
-        _maxQueuedFrames = info.Profile.Codec == StreamCodec.RawBgra
-            ? 2
+        var profile = info.Profile;
+        _maxQueuedFrames = profile.Codec == StreamCodec.RawBgra
+            ? (profile.KeepLatestRawFrame ? 1 : 2)
             : Math.Max(30, info.Profile.Fps * 2);
+        if (profile.Codec == StreamCodec.RawBgra && profile.RequireNativeRawFrames)
+        {
+            _requiredRawFrameBytes = checked(StreamedPanelProfile.FramePixels(profile.CssWidth, profile.Dpr)
+                * StreamedPanelProfile.FramePixels(profile.CssHeight, profile.Dpr) * 4);
+        }
     }
 
     public string SessionId { get; }
@@ -122,8 +132,20 @@ public sealed class StreamSession
     /// </summary>
     public void AcceptFrame(StreamFrame frame)
     {
+        if (_requiredRawFrameBytes is int required)
+        {
+            var length = frame.Length < 0 ? frame.Payload.Length : frame.Length;
+            if (length != required || length > frame.Payload.Length)
+            {
+                frame.Release();
+                if (Interlocked.Exchange(ref _loggedRawFrameSize, 1) == 0)
+                    ServiceLog.Warn($"[streamed-panel] session={SessionId} invalid raw frame length {length}, expected {required}");
+                return;
+            }
+        }
+
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
-        var last = System.Threading.Interlocked.Exchange(ref _lastIngestTicks, now);
+        var last = Interlocked.Exchange(ref _lastIngestTicks, now);
         if (last != 0)
             RecordIngestGap((now - last) * 1000 / System.Diagnostics.Stopwatch.Frequency);
         var native = Upscaler is { } upscaler ? upscaler.Apply(frame) : frame;

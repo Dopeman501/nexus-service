@@ -563,6 +563,24 @@ public sealed class StreamedPanelCoordinator : BackgroundService
         return ids;
     }
 
+    internal (string Serial, string SessionId)? FindActivePanelStream(string panelDeviceId, string family)
+    {
+        lock (_lock)
+        {
+            foreach (var ds in _bySerial.Values)
+            {
+                if (!ds.Session.Closed
+                    && string.Equals(ds.Session.PanelDeviceId, panelDeviceId, StringComparison.Ordinal)
+                    && string.Equals(ds.Discovery.HandlerId, family, StringComparison.Ordinal)
+                    && string.Equals(ds.Info.Profile.Family, family, StringComparison.Ordinal))
+                {
+                    return (ds.Info.Serial, ds.Session.SessionId);
+                }
+            }
+        }
+        return null;
+    }
+
     /// <summary>Applies a persisted panel backlight change without waiting for a frame.</summary>
     public bool ApplyBrightness(string panelDeviceId)
     {
@@ -1054,9 +1072,11 @@ public sealed class StreamedPanelCoordinator : BackgroundService
         {
             try { old.Dispose(); } catch { }
         }
+        IStreamedPanelTransport? unaccepted = null;
         try
         {
             var transport = ds.Discovery.CreateTransport(ds.Info);
+            unaccepted = transport;
             // Mount orientation is applied to the bytes, not the render, so the editor and
             // the preview stay upright. Pushed-frame cooler LCDs only.
             var panelId = ds.Session.PanelDeviceId;
@@ -1104,9 +1124,9 @@ public sealed class StreamedPanelCoordinator : BackgroundService
             }
             if (!accepted)
             {
-                try { transport.Dispose(); } catch { }
                 return;
             }
+            unaccepted = null;
             ds.Session.SetTransportUp(true);
             ds.Writer.SetTransport(transport);
             // No frames flow to a panel held dark, so nothing else would carry the dark value to a
@@ -1140,6 +1160,17 @@ public sealed class StreamedPanelCoordinator : BackgroundService
         {
             ds.Session.SetTransportUp(false);
             ServiceLog.Error($"[streamed-panel] transport open failed serial={ds.Info.Serial}: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            if (unaccepted is not null)
+            {
+                try { unaccepted.Dispose(); }
+                catch (Exception ex)
+                {
+                    ServiceLog.Warn($"[streamed-panel] transport activation cleanup failed serial={ds.Info.Serial}: {ex.GetType().Name}");
+                }
+            }
         }
     }
 
@@ -1234,6 +1265,8 @@ public sealed class StreamedPanelCoordinator : BackgroundService
            && a.CssHeight == b.CssHeight
            && a.Dpr.Equals(b.Dpr)
            && a.RenderScale.Equals(b.RenderScale)
+           && a.RequireNativeRawFrames == b.RequireNativeRawFrames
+           && a.KeepLatestRawFrame == b.KeepLatestRawFrame
            && a.Fps == b.Fps
            && a.BitrateKbps == b.BitrateKbps
            && a.WriteBatchFrames == b.WriteBatchFrames;

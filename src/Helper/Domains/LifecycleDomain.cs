@@ -1,8 +1,10 @@
 #if WINDOWS
 using System;
+using System.IO;
 using System.Runtime.Versioning;
 using System.Threading;
 using System.Threading.Tasks;
+using Nexus.Service.Platform;
 using Nexus.Service.Serialization;
 
 // ---------- Wire messages + AppJsonContext entries ----------
@@ -55,15 +57,34 @@ public sealed class ServiceRequestStopPayload { }
 [SupportedOSPlatform("windows")]
 public static class LifecycleCommands
 {
-    public static Task SendShutdownAsync(HelperRegistry registry, CancellationToken ct = default)
+    public static async Task SendShutdownAsync(HelperRegistry registry, CancellationToken ct = default)
     {
         var conn = registry.GetAny();
-        if (conn is null) return Task.CompletedTask;
-        return conn.SendAsync(
-            type: "helper.shutdown",
-            payload: new HelperShutdownPayload(),
-            payloadType: AppJsonContext.Default.HelperShutdownPayload,
-            ct: ct);
+        if (conn is null) return;
+
+        using var budget = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        budget.CancelAfter(TimeSpan.FromSeconds(2));
+        try
+        {
+            await conn.SendAsync(
+                type: "helper.shutdown",
+                payload: new HelperShutdownPayload(),
+                payloadType: AppJsonContext.Default.HelperShutdownPayload,
+                ct: budget.Token).ConfigureAwait(false);
+            // A pipe write can finish before the helper reads the command.
+            await conn.Closed.WaitAsync(budget.Token).ConfigureAwait(false);
+            ServiceLog.Info($"[helper-pipe] connection closed during shutdown (session {conn.SessionId})");
+        }
+        catch (OperationCanceledException) when (budget.IsCancellationRequested)
+        {
+            ServiceLog.Warn($"[helper-pipe] shutdown wait ended before connection close (session {conn.SessionId})");
+            throw;
+        }
+        catch (Exception ex) when (ex is IOException or ObjectDisposedException)
+        {
+            ServiceLog.Warn($"[helper-pipe] shutdown write failed (session {conn.SessionId}, {ex.GetType().Name})");
+            throw;
+        }
     }
 
     public static Task NotifyOverlayPrefsChangedAsync(HelperRegistry registry, CancellationToken ct = default)

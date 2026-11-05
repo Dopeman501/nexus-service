@@ -87,15 +87,20 @@ public sealed class StreamedPanelCoordinatorTests : IDisposable
         public bool IsOpen { get; private set; }
         public string Serial { get; }
         public bool FailOpen { get; set; }
+        public bool FailStartPlayer { get; set; }
+        public int DisposeCount { get; private set; }
         public FakeTransport(string serial) { Serial = serial; }
         public void Open()
         {
             if (FailOpen) throw new IOException("open refused");
             IsOpen = true;
         }
-        public void StartPlayer() { }
+        public void StartPlayer()
+        {
+            if (FailStartPlayer) throw new IOException("playback refused");
+        }
         public void Write(ReadOnlySpan<byte> annexBAccessUnit) { }
-        public void Dispose() { IsOpen = false; }
+        public void Dispose() { DisposeCount++; IsOpen = false; }
     }
 
     private sealed class FakeBrightnessTransport : IStreamedPanelTransport, IBrightnessPanelTransport
@@ -167,6 +172,7 @@ public sealed class StreamedPanelCoordinatorTests : IDisposable
         public List<FakeBrightnessTransport> BrightnessTransports { get; } = new();
         public bool UseBrightnessTransport { get; set; }
         public bool FailOpen { get; set; }
+        public bool FailStartPlayer { get; set; }
         public bool Withheld { get; set; }
         public bool ListedWhileWithheld { get; set; }
         public string? WithheldSerial => Withheld ? Devices.FirstOrDefault()?.Serial : null;
@@ -181,7 +187,7 @@ public sealed class StreamedPanelCoordinatorTests : IDisposable
                 BrightnessTransports.Add(brightness);
                 return brightness;
             }
-            var t = new FakeTransport(info.Serial) { FailOpen = FailOpen };
+            var t = new FakeTransport(info.Serial) { FailOpen = FailOpen, FailStartPlayer = FailStartPlayer };
             Transports.Add(t);
             return t;
         }
@@ -818,6 +824,31 @@ public sealed class StreamedPanelCoordinatorTests : IDisposable
     };
 
     [Fact]
+    public void Native_raw_panel_assignment_and_ingest_use_the_same_exact_frame_size()
+    {
+        var device = Sized(756, 1680);
+        _discovery.Devices.Add(new StreamedPanelDeviceInfo
+        {
+            Serial = device.Serial,
+            Profile = device.Profile with { RequireNativeRawFrames = true, KeepLatestRawFrame = true, RenderScale = 0.5 },
+        });
+        var coordinator = Coordinator();
+        coordinator.TickOnce();
+
+        var assignment = Assert.Single(coordinator.GetAssignments().Assignments);
+        Assert.Equal(1.0, assignment.Dpr);
+        Assert.Null(_registry.Get(assignment.PanelDeviceId)!.Capabilities!.SupportsRenderScale);
+        var session = Assert.IsType<StreamSession>(coordinator.TryBindIngest(assignment.SessionId, new DefaultHttpContext()));
+        Assert.Null(session.Upscaler);
+        if (OperatingSystem.IsWindows()) Assert.Equal(5_080_320, session.FrameSectionBytes);
+
+        session.AcceptFrame(new StreamFrame { Flags = StreamFraming.FlagIdr, Payload = new byte[32] });
+        Assert.Equal(0, session.StatsSnapshot().Enqueued);
+        session.AcceptFrame(new StreamFrame { Flags = StreamFraming.FlagIdr, Payload = new byte[5_080_320] });
+        Assert.Equal(1, session.StatsSnapshot().Enqueued);
+    }
+
+    [Fact]
     public void A_raw_panel_over_1000_px_renders_lower_until_its_record_asks_for_high_resolution()
     {
         _discovery.Devices.Add(Sized(2288, 1080));
@@ -904,18 +935,24 @@ public sealed class StreamedPanelCoordinatorTests : IDisposable
         Assert.Equal(new[] { true }, liveAtNotify);
     }
 
-    [Fact]
-    public void Failed_transport_open_still_publishes_and_retries_next_tick()
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Failed_transport_activation_releases_the_attempt_and_retries_next_tick(bool failDuringOpen)
     {
         _discovery.Devices.Add(Device());
-        _discovery.FailOpen = true;
+        _discovery.FailOpen = failDuringOpen;
+        _discovery.FailStartPlayer = !failDuringOpen;
         var coordinator = Coordinator();
 
         coordinator.TickOnce();
         Assert.Single(coordinator.GetAssignments().Assignments);
-        Assert.All(_discovery.Transports, t => Assert.False(t.IsOpen));
+        var failed = Assert.Single(_discovery.Transports);
+        Assert.False(failed.IsOpen);
+        Assert.Equal(1, failed.DisposeCount);
 
         _discovery.FailOpen = false;
+        _discovery.FailStartPlayer = false;
         coordinator.TickOnce();
         Assert.Contains(_discovery.Transports, t => t.IsOpen);
     }
