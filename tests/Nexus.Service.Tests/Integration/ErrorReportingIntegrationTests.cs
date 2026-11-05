@@ -16,20 +16,28 @@ using Nexus.Service.Telemetry;
 
 namespace Nexus.Service.Tests.Integration;
 
-public sealed class ErrorReportingIntegrationTests : IClassFixture<NexusAppFactory>
+public sealed class ErrorReportingIntegrationTests : IDisposable
 {
     private static readonly string CrashFile =
         Path.Combine(Path.GetTempPath(), "nexus-err-itest-" + Guid.NewGuid().ToString("N"), "error-crash.json");
 
+    private readonly NexusAppFactory _baseFactory = new();
     private readonly Microsoft.AspNetCore.Mvc.Testing.WebApplicationFactory<Program> _factory;
 
-    // The shared host reports nothing in a non-official build, so the reporter is swapped for a capturing one on a temp crash file.
-    public ErrorReportingIntegrationTests(NexusAppFactory factory) =>
-        _factory = factory.WithWebHostBuilder(b => b.ConfigureTestServices(s =>
+    // Non-official builds do not report errors by default. Use a capturing reporter on a temp crash file.
+    // Give each child host its own settings path so another host's debounced writes cannot change its consent.
+    public ErrorReportingIntegrationTests() =>
+        _factory = _baseFactory.WithWebHostBuilder(b => b.ConfigureTestServices(s =>
         {
             s.RemoveAll<ErrorReporter>();
             s.AddSingleton(sp => new ErrorReporter(sp.GetRequiredService<IConfigStore>(), new NullErrorTransport(), TimeProvider.System, CrashFile));
         }));
+
+    public void Dispose()
+    {
+        _factory.Dispose();
+        _baseFactory.Dispose();
+    }
 
     private string Token => _factory.Services.GetRequiredService<TokenService>().Token;
 
