@@ -7,6 +7,8 @@ namespace Nexus.Service.Models.Panel;
 public sealed class D215PanelsDto
 {
     public bool Enabled { get; set; }
+    /// <summary>Null preserves legacy opaque circle fills; false hides backgrounds while retaining their settings.</summary>
+    public bool? BackgroundsEnabled { get; set; }
     public List<D215PanelDto> Items { get; set; } = new();
 }
 
@@ -25,4 +27,5 @@ public sealed class D215PanelDto
     [JsonRequired, JsonNumberHandling(JsonNumberHandling.Strict)]
     public double Diameter { get; set; }
     public Dictionary<string, JsonElement>? Config { get; set; }
+    public D215PanelBackgroundDto? Background { get; set; }
 }

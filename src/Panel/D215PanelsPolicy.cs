@@ -60,7 +60,8 @@ internal static class D215PanelsPolicy
                 || (!BuiltInTypes.Contains(item.Type) && !AppIds.IsValid(WidgetSettingsService.MarketplaceIdFromType(item.Type)))
                 || !double.IsFinite(item.X) || item.X is < 0 or > 1
                 || !double.IsFinite(item.Y) || item.Y is < 0 or > 1
-                || !double.IsFinite(item.Diameter) || item.Diameter is < 0.12 or > 1)
+                || !double.IsFinite(item.Diameter) || item.Diameter is < 0.12 or > 1
+                || !D215PanelBackgroundPolicy.IsValid(item.Background))
             {
                 return false;
             }

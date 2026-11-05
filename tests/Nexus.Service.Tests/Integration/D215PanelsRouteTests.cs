@@ -180,6 +180,47 @@ public sealed class D215PanelsRouteTests : IDisposable
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Fact]
+    public async Task Each_panel_background_and_the_switch_roundtrip_without_replacing_the_shared_background()
+    {
+        using var client = Client();
+        var id = Record();
+        using var shared = await Post(client, id, "{\"backgroundColor\":\"#123456\"}");
+        Assert.Equal(HttpStatusCode.OK, shared.StatusCode);
+        var first = Item().Replace("\"config\":", "\"background\":{\"mode\":\"solid\",\"color\":\"#abcdef\"},\"config\":");
+        var second = Item("circle-2").Replace("\"config\":", "\"background\":{\"mode\":\"shader\",\"effect\":\"plasma\",\"effectState\":{\"speed\":20,\"params\":{}}},\"config\":");
+        var body = Body("[" + first + "," + second + "]").Replace("\"d215Panels\":{", "\"d215Panels\":{\"backgroundsEnabled\":true,");
+        using var response = await Post(client, id, body);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var get = await client.GetAsync($"/panel/devices/{id}");
+        var record = await Read(get);
+        Assert.Equal("#123456", record.GetProperty("backgroundColor").GetString());
+        var panels = record.GetProperty("layout").GetProperty("d215Panels");
+        Assert.True(panels.GetProperty("backgroundsEnabled").GetBoolean());
+        Assert.Equal("#abcdef", panels.GetProperty("items")[0].GetProperty("background").GetProperty("color").GetString());
+        Assert.Equal(20, panels.GetProperty("items")[1].GetProperty("background").GetProperty("effectState").GetProperty("speed").GetInt32());
+        using var disabled = await Post(client, id, body.Replace("\"backgroundsEnabled\":true", "\"backgroundsEnabled\":false"));
+        Assert.Equal(HttpStatusCode.OK, disabled.StatusCode);
+        using var after = await client.GetAsync($"/panel/devices/{id}");
+        Assert.False((await Read(after)).GetProperty("layout").GetProperty("d215Panels").GetProperty("backgroundsEnabled").GetBoolean());
+    }
+
+    [Theory]
+    [InlineData("{\"mode\":\"desktop\"}")]
+    [InlineData("{\"mediaId\":\"../secret\"}")]
+    [InlineData("{\"opacity\":2}")]
+    [InlineData("{\"opacity\":\"0.5\"}")]
+    [InlineData("{\"template\":\"1\"}")]
+    [InlineData("{\"effectState\":{\"params\":{\"u_zoom\":[]}}}")]
+    public async Task Invalid_nested_backgrounds_are_rejected_even_with_both_switches_off(string background)
+    {
+        using var client = Client();
+        var item = Item().Replace("\"config\":", "\"background\":" + background + ",\"config\":");
+        var body = Body("[" + item + "]", enabled: false).Replace("\"d215Panels\":{", "\"d215Panels\":{\"backgroundsEnabled\":false,");
+        using var response = await Post(client, Record(), body);
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+    }
+
     private void InstallApp(string appId, string size = "2x2round", string surface = "lcd-round", bool single = false)
     {
         var folder = Path.Combine(_apps, appId);
