@@ -48,5 +48,6 @@ internal sealed class D215PanelDiscovery(
     }
 
     public IStreamedPanelTransport CreateTransport(StreamedPanelDeviceInfo info) =>
-        new D215StreamTransport(info.Serial, worker, rotateLandscape: info.Profile.Surface == PanelSurfaces.LcdWide);
+        new D215StreamTransport(info.Serial, worker, rotateLandscape: info.Profile.Surface == PanelSurfaces.LcdWide,
+            framesPerSecond: info.Profile.Fps);
 }

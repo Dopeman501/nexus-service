@@ -111,8 +111,9 @@ internal sealed class D215Session : IAsyncDisposable
         }
     }
 
-    internal D215LiveStream BeginStreaming(ID215FrameSource frames, Func<bool> isAuthorized)
+    internal D215LiveStream BeginStreaming(ID215FrameSource frames, Func<bool> isAuthorized, int? framesPerSecond = null)
     {
+        var streamTiming = _timing.AtFrameRate(framesPerSecond);
         if (!isAuthorized()) throw new InvalidOperationException("The identified D215 session is no longer authorized.");
         lock (_disposeLock)
         {
@@ -120,7 +121,7 @@ internal sealed class D215Session : IAsyncDisposable
                 throw new InvalidOperationException("The D215 serial session is closing or faulted.");
             if (_live is { Completion.IsCompleted: false })
                 throw new InvalidOperationException("The D215 serial session already has a stream owner.");
-            return _live = new D215LiveStream(_wire, frames, isAuthorized, _clock, _timing,
+            return _live = new D215LiveStream(_wire, frames, isAuthorized, _clock, streamTiming,
                 info => Volatile.Write(ref _confirmedInfo, info));
         }
     }

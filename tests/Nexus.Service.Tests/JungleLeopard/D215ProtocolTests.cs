@@ -20,21 +20,33 @@ public class D215ProtocolTests
     }
 
     [Theory]
+    // Lower presets use the same documented one-byte payload/checksum format;
+    // these vectors do not claim physical verification of those levels.
+    [InlineData(20, "55AA080003141E01")]
+    [InlineData(40, "55AA080003283201")]
+    [InlineData(60, "55AA0800033C4601")]
     [InlineData(80, "55AA080003505A01")]
     [InlineData(100, "55AA080003646E01")]
-    public void BuildBrightnessRequest_matches_the_tested_presets(int brightness, string expected)
+    public void BuildBrightnessRequest_matches_the_preset_wire_vectors(int brightness, string expected)
     {
         Assert.Equal(Convert.FromHexString(expected), D215Protocol.BuildBrightnessRequest(brightness));
     }
 
     [Theory]
     [InlineData(-1)]
+    [InlineData(0)]
+    [InlineData(19)]
+    [InlineData(21)]
+    [InlineData(39)]
+    [InlineData(41)]
+    [InlineData(59)]
+    [InlineData(61)]
     [InlineData(79)]
     [InlineData(81)]
     [InlineData(99)]
     [InlineData(101)]
     [InlineData(336)]
-    public void BuildBrightnessRequest_rejects_untested_values(int brightness)
+    public void BuildBrightnessRequest_rejects_values_outside_the_presets(int brightness)
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => D215Protocol.BuildBrightnessRequest(brightness));
     }

@@ -111,6 +111,9 @@ public static class PanelProfileData
         foreach (var (src, dst) in Pair(saved, targets))
         {
             CopyLook(src, dst);
+            dst.Layout = D215PanelsPolicy.ForTarget(dst.Layout, dst.Capabilities);
+            foreach (var preset in dst.Presets ?? [])
+                preset.Layout = D215PanelsPolicy.ForTarget(preset.Layout, dst.Capabilities);
             // A layout left unset on a streamed strip reseeds the way a personalization reset does.
             dst.Layout ??= PanelLayoutDefaults.StripSeedFor(dst);
         }
@@ -145,7 +148,10 @@ public static class PanelProfileData
             candidates.AddRange((src.Presets ?? new()).Where(p => p != loaded).Select(p => (p.Name, (IPanelPersonalization)p)));
             foreach (var (name, look) in candidates)
             {
-                if (IsDefaultCandidate(look, dst) || !known.Add(LookKey(look)))
+                var safeLook = new PanelPreset();
+                PanelPresets.Copy(look, safeLook);
+                safeLook.Layout = D215PanelsPolicy.ForTarget(safeLook.Layout, dst.Capabilities);
+                if (IsDefaultCandidate(safeLook, dst) || !known.Add(LookKey(safeLook)))
                 {
                     continue;
                 }
@@ -155,7 +161,7 @@ public static class PanelProfileData
                     continue;
                 }
                 var preset = new PanelPreset { Id = Guid.NewGuid().ToString("n"), Name = UniquePresetName(dst.Presets, name) };
-                PanelPresets.Copy(look, preset);
+                PanelPresets.Copy(safeLook, preset);
                 dst.Presets.Add(preset);
                 changed = true;
             }

@@ -8,6 +8,28 @@ namespace Nexus.Service.Tests.JungleLeopard;
 public sealed class D215BgraFramesTests
 {
     [Fact]
+    public void A_failed_still_rotation_retries_the_canonical_frame_without_new_input()
+    {
+        var reject = false;
+        var flip180 = false;
+        using var frames = new D215BgraFrames(756 * 1680 * 4, _ => new ConditionalEncoder(() => reject), () => true);
+        frames.BindFlip180(() => flip180);
+        var frame = new byte[756 * 1680 * 4];
+        frame[0] = 1;
+        frame[^4] = 2;
+        frames.Queue(frame);
+        Assert.Equal(1, frames.TakeLatestEnvelope().Span[4]);
+
+        flip180 = reject = true;
+        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        reject = false;
+
+        Assert.Equal(2, frames.TakeLatestEnvelope().Span[4]);
+        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.Equal(1, frames.DroppedFrames);
+    }
+
+    [Fact]
     public void Split_and_coalesced_writes_preserve_frame_boundaries_and_keep_the_latest()
     {
         using var frames = new D215BgraFrames(4, _ => new EchoEncoder());
@@ -118,6 +140,12 @@ public sealed class D215BgraFramesTests
             frame.CopyTo(_reused);
             return _reused.AsSpan(0, frame.Length);
         }
+        public void Dispose() { }
+    }
+
+    private sealed class ConditionalEncoder(Func<bool> reject) : ID215JpegEncoder
+    {
+        public ReadOnlySpan<byte> Encode(ReadOnlySpan<byte> frame) => reject() ? [] : frame[..4];
         public void Dispose() { }
     }
 

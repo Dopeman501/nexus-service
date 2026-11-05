@@ -28,8 +28,8 @@ internal static class D215Protocol
 
     internal static byte[] BuildBrightnessRequest(int brightness)
     {
-        if (brightness is not (80 or 100))
-            throw new ArgumentOutOfRangeException(nameof(brightness), brightness, "The D215 supports the verified presets 80 and 100.");
+        if (brightness is not (20 or 40 or 60 or 80 or 100))
+            throw new ArgumentOutOfRangeException(nameof(brightness), brightness, "D215 brightness must be 20, 40, 60, 80 or 100.");
 
         return BuildControlRequest(BrightnessCommand, [(byte)brightness]);
     }

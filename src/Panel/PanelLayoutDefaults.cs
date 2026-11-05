@@ -50,6 +50,11 @@ public static class PanelLayoutDefaults
             for (var w = 0; w < page.Widgets.Count; w++)
                 page.Widgets[w].Id = StableId(seed, $"page{p}/widget{w}");
         }
+        if (layout.D215Panels?.Items is { } circles)
+        {
+            for (var i = 0; i < circles.Count; i++)
+                circles[i]?.Id = StableId(seed, $"d215-panel{i}");
+        }
         return layout;
     }
 

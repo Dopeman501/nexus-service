@@ -59,7 +59,8 @@ public static class GalleryPlaylistUsage
     }
 
     private static int CountInLayout(PanelLayoutDto? layout, string playlistId) =>
-        layout?.Pages.Sum(p => p.Widgets.Count(w => w.Type == GalleryType && Plays(w.Config, playlistId))) ?? 0;
+        (layout?.Pages.Sum(p => p.Widgets.Count(w => w.Type == GalleryType && Plays(w.Config, playlistId))) ?? 0)
+        + (layout?.D215Panels?.Items?.Count(item => item is not null && item.Type == GalleryType && Plays(item.Config, playlistId)) ?? 0);
 
     private static bool Plays(Dictionary<string, JsonElement>? config, string playlistId) =>
         config is not null

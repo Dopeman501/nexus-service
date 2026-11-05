@@ -41,6 +41,9 @@ public sealed class PanelLayoutDto
     /// </summary>
     public PanelWidgetPlaylistDto? WidgetPlaylist { get; set; }
 
+    /// <summary>Independent circular widget composition for the D215. The ordinary widget layout remains intact.</summary>
+    public D215PanelsDto? D215Panels { get; set; }
+
     /// <summary>
     /// Id of the widget the panel opens straight into immersive view on load,
     /// skipping the dashboard. At most one per layout, and it must live on the

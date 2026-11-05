@@ -621,14 +621,16 @@ public sealed class PanelDeviceRegistry
             changed.Clear();
             foreach (var record in s.PanelDevices.Values)
             {
-                if (record.Layout is null) continue;
                 var removed = 0;
-                foreach (var page in record.Layout.Pages)
+                foreach (var page in record.Layout?.Pages ?? [])
                     removed += page.Widgets.RemoveAll(w => string.Equals(w.Type, widgetType, StringComparison.Ordinal));
+                removed += RemoveCircleType(record.Layout, widgetType);
+                foreach (var preset in record.Presets ?? [])
+                    removed += RemoveCircleType(preset.Layout, widgetType);
                 if (removed == 0) continue;
-                var mark = record.Layout.ImmersiveOnLoadWidgetId;
+                var mark = record.Layout?.ImmersiveOnLoadWidgetId;
                 if (!string.IsNullOrEmpty(mark)
-                    && !record.Layout.Pages.Any(p => p.Widgets.Any(w => string.Equals(w.Id, mark, StringComparison.Ordinal))))
+                    && !record.Layout!.Pages.Any(p => p.Widgets.Any(w => string.Equals(w.Id, mark, StringComparison.Ordinal))))
                 {
                     record.Layout.ImmersiveOnLoadWidgetId = null;
                 }
@@ -639,8 +641,15 @@ public sealed class PanelDeviceRegistry
     }
 
     private static bool HasWidgetType(PanelDeviceRecord record, string widgetType)
-        => record.Layout is not null
-           && record.Layout.Pages.Any(p => p.Widgets.Any(w => string.Equals(w.Type, widgetType, StringComparison.Ordinal)));
+        => (record.Layout?.Pages.Any(p => p.Widgets.Any(w => string.Equals(w.Type, widgetType, StringComparison.Ordinal))) ?? false)
+           || HasCircleType(record.Layout, widgetType)
+           || (record.Presets?.Any(preset => HasCircleType(preset.Layout, widgetType)) ?? false);
+
+    private static bool HasCircleType(PanelLayoutDto? layout, string type) =>
+        layout?.D215Panels?.Items?.Any(item => item is not null && string.Equals(item.Type, type, StringComparison.Ordinal)) ?? false;
+
+    private static int RemoveCircleType(PanelLayoutDto? layout, string type) =>
+        layout?.D215Panels?.Items?.RemoveAll(item => item is not null && string.Equals(item.Type, type, StringComparison.Ordinal)) ?? 0;
 
     internal static PanelDeviceRecord? FindNewestY70(NexusSettings settings)
     {
@@ -1096,6 +1105,7 @@ public sealed class PanelDeviceRegistry
                 return;
             PanelPresets.CaptureActive(record);
             PanelPresets.Copy(target, record);
+            record.Layout = D215PanelsPolicy.ForTarget(record.Layout, record.Capabilities);
             record.ActivePresetId = target.Id;
             result = PanelPresets.ToResponse(record);
         });

@@ -27,12 +27,16 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
     private readonly Func<bool>? _mayRepeat;
     private readonly ID215JpegEncoder?[] _encoders = new ID215JpegEncoder?[Qualities.Length];
     private readonly byte[]? _portrait;
+    private byte[]? _oriented;
+    private Func<bool>? _readFlip180;
     private byte[] _partial;
     private byte[] _pending;
     private byte[] _active;
     private int _partialLength;
     private long _pendingAt;
     private bool _hasPending;
+    private bool _hasActive;
+    private bool _activeFlip180;
     private bool _disposed;
     private long _droppedFrames;
     private long _reportedDrops;
@@ -64,6 +68,8 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
         new(Width * Height * BytesPerPixel, static quality => new JpegEncoder(quality), mayRepeat, rotateLandscape);
 
     internal long DroppedFrames => Interlocked.Read(ref _droppedFrames);
+
+    internal void BindFlip180(Func<bool> source) => _readFlip180 = source;
 
     public bool MayRepeat => _mayRepeat?.Invoke() == true;
 
@@ -110,30 +116,60 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
 
     public ReadOnlyMemory<byte> TakeLatestEnvelope()
     {
+        var flip180 = _readFlip180?.Invoke() == true;
+        // The gate belongs to the coordinator; never call it while holding the
+        // producer queue lock, since it may acquire the coordinator's lock.
+        var mayRepeat = MayRepeat;
         long queuedAt;
+        bool fresh;
         lock (_queueLock)
         {
-            if (!_hasPending || _disposed) return ReadOnlyMemory<byte>.Empty;
-            (_pending, _active) = (_active, _pending);
-            _hasPending = false;
+            if (_disposed) return ReadOnlyMemory<byte>.Empty;
+            fresh = _hasPending;
+            if (fresh)
+            {
+                (_pending, _active) = (_active, _pending);
+                _hasPending = false;
+                _hasActive = true;
+            }
+            else if (!_hasActive || flip180 == _activeFlip180 || !mayRepeat)
+            {
+                return ReadOnlyMemory<byte>.Empty;
+            }
             queuedAt = _pendingAt;
         }
 
         var encodeStartedAt = Stopwatch.GetTimestamp();
-        var envelope = EncodeActiveFrame();
-        if (envelope.IsEmpty) Interlocked.Increment(ref _droppedFrames);
-        else ReportFreshFrameTiming(queuedAt, encodeStartedAt);
+        var envelope = EncodeActiveFrame(flip180);
+        if (envelope.IsEmpty)
+        {
+            Interlocked.Increment(ref _droppedFrames);
+        }
+        else
+        {
+            _activeFlip180 = flip180;
+            if (fresh) ReportFreshFrameTiming(queuedAt, encodeStartedAt);
+        }
         ReportDrops();
         return envelope;
     }
 
-    private ReadOnlyMemory<byte> EncodeActiveFrame()
+    private ReadOnlyMemory<byte> EncodeActiveFrame(bool flip180)
     {
         ReadOnlySpan<byte> pixels = _active;
+        if (flip180)
+        {
+            // Keep the retained source canonical so a still image can be turned back
+            // without waiting for the renderer to produce another complete frame.
+            _oriented ??= new byte[_frameBytes];
+            BgraOrientation.Apply(_active, _portrait is null ? Width : Height,
+                _portrait is null ? Height : Width, flip180: true, mirror: false, _oriented);
+            pixels = _oriented;
+        }
         if (_portrait is not null)
         {
             // Firmware 3.4 rotates the portrait JPEG clockwise on a wide-mounted panel.
-            BgraQuarterTurn.RotateCcw(_active, Height, Width, _portrait);
+            BgraQuarterTurn.RotateCcw(pixels, Height, Width, _portrait);
             pixels = _portrait;
         }
         for (var i = 0; i < Qualities.Length; i++)

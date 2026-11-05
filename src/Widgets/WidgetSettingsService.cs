@@ -3,6 +3,7 @@ using System.Linq;
 using System.Text.Json;
 using Nexus.Service.Models.Panel;
 using Nexus.Service.Models.Widgets;
+using Nexus.Service.Panel;
 using Nexus.Service.Persistence;
 
 namespace Nexus.Service.Widgets;
@@ -91,6 +92,7 @@ public sealed class WidgetSettingsService
             }
             if (widget.Config.Count == 0) widget.Config = null;
             StoreStandInConfig(s, instanceId, widget.Config);
+            StoreCircleConfig(s, instanceId, widget.Config);
         });
         return Get(instanceId);
     }
@@ -148,13 +150,13 @@ public sealed class WidgetSettingsService
         foreach (var device in s.PanelDevices.Values)
         {
             if (device.Layout is null) continue;
-            var hit = FindInLayout(device.Layout, instanceId);
+            var hit = FindInLayout(device.Layout, instanceId, D215PanelsPolicy.IsD215(device.Capabilities));
             if (hit is not null) return hit;
         }
         return null;
     }
 
-    private static PanelWidgetDto? FindInLayout(PanelLayoutDto layout, string instanceId)
+    private static PanelWidgetDto? FindInLayout(PanelLayoutDto layout, string instanceId, bool includeCircles = false)
     {
         foreach (var page in layout.Pages)
         {
@@ -163,7 +165,22 @@ public sealed class WidgetSettingsService
                 if (w.Id == instanceId) return w;
             }
         }
+        var circle = includeCircles ? layout.D215Panels?.Items?.Find(item => item is not null && item.Id == instanceId) : null;
+        if (circle is not null)
+            return new PanelWidgetDto { Id = circle.Id, Type = circle.Type, Config = circle.Config };
         return null;
+    }
+
+    private static void StoreCircleConfig(NexusSettings settings, string instanceId, Dictionary<string, JsonElement>? config)
+    {
+        foreach (var device in settings.PanelDevices.Values)
+        {
+            if (!D215PanelsPolicy.IsD215(device.Capabilities)) continue;
+            var circle = device.Layout?.D215Panels?.Items?.Find(item => item is not null && item.Id == instanceId);
+            if (circle is null) continue;
+            circle.Config = config;
+            return;
+        }
     }
 
     private static bool TryParseStandIn(string instanceId, out string deviceId, out string type)

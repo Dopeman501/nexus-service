@@ -2,6 +2,7 @@ using System;
 using System.Threading;
 using System.Threading.Tasks;
 using Nexus.Service.Models.Panel;
+using Nexus.Service.Lighting.Engine;
 using Nexus.Service.Platform;
 
 namespace Nexus.Service.Peripherals.JungleLeopard;
@@ -40,7 +41,7 @@ internal sealed class D215LiveStream
 
     internal ValueTask<D215BrightnessResponse> SetBrightnessAsync(int value, Func<bool> isAuthorized, CancellationToken cancellationToken)
     {
-        if (value is not (80 or 100)) throw new ArgumentOutOfRangeException(nameof(value));
+        if (value is not (20 or 40 or 60 or 80 or 100)) throw new ArgumentOutOfRangeException(nameof(value));
         if (cancellationToken.IsCancellationRequested || StopRequested || Completion.IsCompleted
             || Failure is not null || !Started.IsCompletedSuccessfully || !isAuthorized())
         {
@@ -128,6 +129,15 @@ internal sealed class D215LiveStream
     private async Task<bool> PumpAsync(D215Wire wire, ID215FrameSource frames, Func<bool> isAuthorized,
         TimeProvider clock, D215Timing timing, long origin, CancellationToken abort)
     {
+        using var preciseClock = OperatingSystem.IsWindows() && ReferenceEquals(clock, TimeProvider.System)
+            ? HighResolutionTicker.TryCreate(_wake.Token) : null;
+        if (OperatingSystem.IsWindows() && ReferenceEquals(clock, TimeProvider.System))
+        {
+            if (preciseClock is null)
+                ServiceLog.Warn("[jungle-leopard-d215] high-resolution frame clock unavailable; frame pacing uses the system timer");
+            else
+                ServiceLog.Info("[jungle-leopard-d215] frame pacing uses a high-resolution waitable timer");
+        }
         var nextRenewal = ScheduleRenewal(TimeSpan.Zero);
         var nextFrame = TimeSpan.Zero;
         var nextReport = ReportInterval;
@@ -164,6 +174,9 @@ internal sealed class D215LiveStream
 
             if (now >= nextFrame)
             {
+                // Pace complete frame work from its start, including encoding and
+                // serial delivery, instead of adding encode time to every interval.
+                var frameStartedAt = clock.GetTimestamp();
                 var latest = frames.TakeLatestEnvelope();
                 if (!latest.IsEmpty) retained = latest;
                 var frame = !latest.IsEmpty || frames.MayRepeat ? retained : default;
@@ -185,15 +198,12 @@ internal sealed class D215LiveStream
                     if (duration > slowestWrite) slowestWrite = duration;
                     sent++;
                     bytes += frame.Length;
-                    nextFrame = clock.GetElapsedTime(origin, writeStart) + timing.FrameInterval;
-                    // Leave room for control when a full envelope already took a frame slot.
-                    if (duration >= timing.FrameInterval)
-                        nextFrame = clock.GetElapsedTime(origin) + timing.FrameInterval;
                 }
-                else
-                {
-                    nextFrame = clock.GetElapsedTime(origin) + timing.FrameInterval;
-                }
+                // An overrun starts a new period at completion; missed slots never
+                // accumulate into a catch-up burst or an extra artificial idle slot.
+                var scheduled = clock.GetElapsedTime(origin, frameStartedAt) + timing.FrameInterval;
+                var completed = clock.GetElapsedTime(origin);
+                nextFrame = scheduled > completed ? scheduled : completed;
             }
 
             now = clock.GetElapsedTime(origin);
@@ -206,7 +216,15 @@ internal sealed class D215LiveStream
             var wakeAt = nextRenewal < nextFrame ? nextRenewal : nextFrame;
             if (wakeAt > now)
             {
-                try { await Task.Delay(wakeAt - now, clock, _wake.Token).ConfigureAwait(false); }
+                if (preciseClock is not null)
+                {
+                    if (!preciseClock.WaitForDelay(wakeAt - now)) break;
+                    continue;
+                }
+                // Task.Delay truncates fractional milliseconds. A positive
+                // submillisecond remainder must yield instead of busy-spinning.
+                var delay = TimeSpan.FromMilliseconds(Math.Ceiling((wakeAt - now).TotalMilliseconds));
+                try { await Task.Delay(delay, clock, _wake.Token).ConfigureAwait(false); }
                 catch (OperationCanceledException) when (StopRequested) { }
             }
         }

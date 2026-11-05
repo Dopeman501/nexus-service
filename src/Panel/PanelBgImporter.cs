@@ -24,6 +24,7 @@ namespace Nexus.Service.Panel;
 public static class PanelBgImporter
 {
     public const long MaxFileSize = 500L * 1024 * 1024;
+    private const int MaxVideoFps = 60;
 
     // An rgba pixel format only says alpha CAN be carried; most exported pngs
     // are rgba and fully opaque, and baking those lossless costs ~10x the bytes.
@@ -121,8 +122,14 @@ public static class PanelBgImporter
         int targetW,
         int targetH,
         bool keepTransparency = true,
-        bool fitWhole = false)
+        bool fitWhole = false,
+        int? maxVideoFps = null)
     {
+        if (maxVideoFps is < 1 or > MaxVideoFps)
+        {
+            return CommitResult.Failure($"Video frame rate limit must be 1..{MaxVideoFps}");
+        }
+
         var stagedPath = library.FindStagedRaw(deviceId, stageId);
         if (stagedPath is null || !File.Exists(stagedPath))
         {
@@ -183,9 +190,13 @@ public static class PanelBgImporter
                 var mediaPath = library.GetMediaPath(deviceId, assetId, ".mp4");
                 var args = new List<string> { "-y", "-i", stagedPath };
                 args.AddRange(CropScaleArgs(crop, ew, eh, matte, animated: true, fitWhole));
+                // A device ceiling preserves lower source rates. Callers that omit it
+                // keep the existing fixed 30 fps conversion used by other panels.
+                args.AddRange(maxVideoFps is { } fps
+                    ? new[] { "-fpsmax", fps.ToString(CultureInfo.InvariantCulture) }
+                    : new[] { "-r", "30" });
                 args.AddRange(new[]
                 {
-                    "-r", "30",
                     "-c:v", "libx264", "-profile:v", "main", "-preset", "veryfast", "-crf", "23",
                     "-pix_fmt", "yuv420p", "-an", "-movflags", "+faststart",
                     "-t", "30", mediaPath,

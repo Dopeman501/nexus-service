@@ -360,9 +360,9 @@ public static class PanelRoutes
             return Results.Json(record, AppJsonContext.Default.PanelDeviceRecord);
         }).AllowPanel();
 
-        app.MapPost("/panel/devices/{id}", (string id, PanelDevicePatch body, HttpContext ctx, PanelDeviceRegistry registry, MultiplexHub hub, TokenService tokens, Nexus.Service.Panel.Streams.StreamedPanelCoordinator streams, Nexus.Service.Deck.ListedAppIds listed, Nexus.Service.Telemetry.ITelemetry telemetry) =>
+        app.MapPost("/panel/devices/{id}", (string id, PanelDevicePatch body, HttpContext ctx, PanelDeviceRegistry registry, MultiplexHub hub, TokenService tokens, Nexus.Service.Panel.Streams.StreamedPanelCoordinator streams, Nexus.Service.Deck.ListedAppIds listed, Nexus.Service.Widgets.AppRegistry apps, Nexus.Service.Telemetry.ITelemetry telemetry) =>
         {
-            var existing = body.Capabilities is not null || body.LcdBrightness.HasValue || body.Portrait.HasValue
+            var existing = body.Capabilities is not null || body.LcdBrightness.HasValue || body.Portrait.HasValue || body.Layout?.D215Panels is not null
                 ? registry.Get(id)
                 : null;
             var hostOwnedD215 = PanelDeviceRegistry.IsHostOwnedD215(existing?.Capabilities);
@@ -370,6 +370,11 @@ public static class PanelRoutes
                 return Results.BadRequest(ApiResponse.Fail("D215 panel capabilities are set by the service"));
             if (body.LcdBrightness.HasValue && hostOwnedD215)
                 return Results.BadRequest(ApiResponse.Fail("D215 brightness requires a confirmed hardware change"));
+            if (body.Layout is { D215Panels: not null } circles
+                && !D215PanelsPolicy.IsValid(circles, existing?.Capabilities, apps, existing?.Layout))
+            {
+                return Results.BadRequest(ApiResponse.Fail("invalid_d215_panels"));
+            }
             // A panel session may rearrange or remove the deck keys it has, but
             // authoring a key that opens a file, sends a key chord, types text or
             // plays an audio file is desktop-only: PanelDeckRoutes executes those

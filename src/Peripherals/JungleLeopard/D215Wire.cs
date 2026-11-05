@@ -8,7 +8,7 @@ namespace Nexus.Service.Peripherals.JungleLeopard;
 internal sealed record D215Timing(TimeSpan OpenTimeout, TimeSpan PortSettle, TimeSpan ClearSettle,
     TimeSpan WriteTimeout, TimeSpan ReplyTimeout)
 {
-    internal const int FramesPerSecond = 5;
+    internal const int FramesPerSecond = 60;
 
     internal static D215Timing Default { get; } = new(TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(500),
         TimeSpan.FromMilliseconds(200), TimeSpan.FromSeconds(2), TimeSpan.FromMilliseconds(2600));
@@ -17,6 +17,14 @@ internal sealed record D215Timing(TimeSpan OpenTimeout, TimeSpan PortSettle, Tim
     internal TimeSpan LiveRenewInterval { get; init; } = TimeSpan.FromMilliseconds(1500);
     internal TimeSpan ReleaseTimeout { get; init; } = TimeSpan.FromSeconds(8);
     internal TimeSpan IdentificationTimeout => OpenTimeout + PortSettle + ClearSettle + WriteTimeout * 3 + ReplyTimeout;
+
+    internal D215Timing AtFrameRate(int? framesPerSecond)
+    {
+        if (framesPerSecond is null) return this;
+        if (framesPerSecond is < 1 or > FramesPerSecond)
+            throw new ArgumentOutOfRangeException(nameof(framesPerSecond));
+        return this with { FrameInterval = TimeSpan.FromSeconds(1.0 / framesPerSecond.Value) };
+    }
 }
 
 /// <summary>Bounded wire operations. The session permits only one caller at a time.</summary>

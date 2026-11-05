@@ -5,6 +5,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Channels;
 using System.Threading.Tasks;
+using Nexus.Service.Panel.Streams;
 using Nexus.Service.Peripherals.JungleLeopard;
 
 namespace Nexus.Service.Tests.JungleLeopard;
@@ -19,6 +20,40 @@ public sealed class D215StreamTransportTests
         ClearSettle = TimeSpan.Zero,
         ReplyTimeout = TimeSpan.FromMilliseconds(500),
     };
+
+    [Fact]
+    public void Rotation_uses_the_coordinators_existing_orientation_contract()
+    {
+        using var transport = CreateTransport(_ => null, () => new EchoEncoder());
+        Assert.IsAssignableFrom<IOrientablePanelTransport>(transport);
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    [InlineData(true, true)]
+    public async Task Coordinator_orientation_is_applied_before_encoding_and_mirror_stays_ignored(bool flip180, bool mirror)
+    {
+        var wire = new FakeWire();
+        await using var session = await IdentifyAsync(wire);
+        using var transport = new D215StreamTransport(Port.Identity, _ => session,
+            repeat => new D215BgraFrames(756 * 1680 * 4, _ => new EdgeEncoder(), repeat), TestDeadline);
+        var orientable = Assert.IsAssignableFrom<IOrientablePanelTransport>(transport);
+        orientable.BindOrientation(() => (flip180, mirror));
+        transport.Open();
+        var starting = Task.Run(transport.StartPlayer);
+        await wire.LiveRequested.Task.WaitAsync(TestDeadline);
+        wire.AcknowledgeLive();
+        await starting.WaitAsync(TestDeadline);
+        var frame = new byte[756 * 1680 * 4];
+        new byte[] { 1, 2, 3, 4 }.CopyTo(frame, 0);
+        new byte[] { 5, 6, 7, 8 }.CopyTo(frame, frame.Length - 4);
+
+        transport.Write(frame);
+
+        var envelope = await wire.FirstJpeg.Task.WaitAsync(TestDeadline);
+        Assert.Equal(flip180 ? new byte[] { 5, 6, 7, 8, 1, 2, 3, 4 } : new byte[] { 1, 2, 3, 4, 5, 6, 7, 8 }, envelope[4..^2]);
+    }
 
     [Fact]
     public async Task Start_waits_for_the_ack_and_writes_only_complete_frames()
@@ -153,6 +188,18 @@ public sealed class D215StreamTransportTests
     private sealed class EchoEncoder : ID215JpegEncoder
     {
         public ReadOnlySpan<byte> Encode(ReadOnlySpan<byte> frame) => frame;
+        public void Dispose() { }
+    }
+
+    private sealed class EdgeEncoder : ID215JpegEncoder
+    {
+        private readonly byte[] _edges = new byte[8];
+        public ReadOnlySpan<byte> Encode(ReadOnlySpan<byte> frame)
+        {
+            frame[..4].CopyTo(_edges);
+            frame[^4..].CopyTo(_edges.AsSpan(4));
+            return _edges;
+        }
         public void Dispose() { }
     }
 

@@ -31,12 +31,16 @@ public static class AppPrefixMigration
             foreach (var record in doc.PanelDevices.Values)
             {
                 RewriteLayout(record?.Layout);
+                foreach (var preset in record?.Presets ?? [])
+                    RewriteLayout(preset.Layout);
             }
         }
     }
 
     private static void RewriteLayout(PanelLayoutDto? layout)
     {
+        foreach (var circle in layout?.D215Panels?.Items ?? [])
+            circle?.Type = Rewrite(circle.Type);
         if (layout?.Pages is not { } pages)
         {
             return;

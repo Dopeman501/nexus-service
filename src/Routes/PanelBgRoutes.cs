@@ -1,10 +1,12 @@
 using System.IO;
 using Nexus.Service.Auth;
+using Nexus.Service.Devices.Handlers;
 using Nexus.Service.Klipy;
 using Nexus.Service.Media;
 using Nexus.Service.Models.Klipy;
 using Nexus.Service.Models.Panel;
 using Nexus.Service.Panel;
+using Nexus.Service.Peripherals.JungleLeopard;
 
 namespace Nexus.Service.Routes;
 
@@ -130,7 +132,7 @@ public static class PanelBgRoutes
             }).AllowPanel();
 
         app.MapPost("/panel/devices/{deviceId}/background-media/commit",
-            async (string deviceId, HttpContext ctx, PanelBgLibrary lib) =>
+            async (string deviceId, HttpContext ctx, PanelBgLibrary lib, PanelDeviceRegistry registry) =>
             {
                 if (!PanelBgLibrary.IsValidId(deviceId))
                 {
@@ -175,9 +177,12 @@ public static class PanelBgRoutes
                 var keepTransparency = form["keepTransparency"].ToString() is not "0" and not "false";
                 // Absent means fill, which is what every client sent before the switch existed.
                 var fitWhole = form["fit"].ToString() is "1" or "true";
+                int? maxVideoFps = registry.Get(deviceId)?.Capabilities?.Family == JungleLeopardD215Handler.HandlerId
+                    ? D215Timing.FramesPerSecond
+                    : null;
 
                 var result = await PanelBgImporter.CommitAsync(
-                    lib, deviceId, stageId, cropRect, targetW, targetH, keepTransparency, fitWhole);
+                    lib, deviceId, stageId, cropRect, targetW, targetH, keepTransparency, fitWhole, maxVideoFps);
                 if (!result.Ok)
                 {
                     return Results.BadRequest(new PanelBgImportResponse { Error = true, Msg = result.Error ?? "Commit failed" });

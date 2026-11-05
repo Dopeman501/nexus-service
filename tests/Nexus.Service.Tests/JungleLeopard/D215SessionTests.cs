@@ -173,7 +173,7 @@ public sealed class D215SessionTests
             var panel = Assert.Single(panels.Discover());
             Assert.Equal(Port.Identity, panel.Serial);
             Assert.Equal("lcd-portrait", panel.Profile.Surface);
-            Assert.Equal((756, 1680, 5, 1), (panel.Profile.CssWidth, panel.Profile.CssHeight, panel.Profile.Fps, panel.Profile.WriteBatchFrames));
+            Assert.Equal((756, 1680, 60, 1), (panel.Profile.CssWidth, panel.Profile.CssHeight, panel.Profile.Fps, panel.Profile.WriteBatchFrames));
             Assert.True(panel.Profile.RequireNativeRawFrames);
             Assert.True(panel.Profile.KeepLatestRawFrame);
             Assert.False(panel.Profile.SupportsBrightness);

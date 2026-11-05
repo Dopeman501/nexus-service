@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
 using System.Threading;
 using Microsoft.Win32.SafeHandles;
+using Nexus.Service.Platform;
 
 namespace Nexus.Service.Lighting.Engine;
 
@@ -22,6 +23,7 @@ internal sealed partial class HighResolutionTicker : IDisposable
     private readonly CancellationToken _ct;
     private WaitHandle[]? _wake;
     private long _deadline;
+    private bool _delayFallbackLogged;
 
     private HighResolutionTicker(SafeWaitHandle handle, CancellationToken ct)
     {
@@ -66,6 +68,32 @@ internal sealed partial class HighResolutionTicker : IDisposable
             // Engine Dispose tears down the token source without joining the loop.
             return false;
         }
+        return !_ct.IsCancellationRequested;
+    }
+
+    /// <summary>One cancelable relative wait, including fractional milliseconds; consumes no spin CPU.</summary>
+    public bool WaitForDelay(TimeSpan delay)
+    {
+        if (_ct.IsCancellationRequested) return false;
+        if (delay <= TimeSpan.Zero) return true;
+        var due = -delay.Ticks;
+        try
+        {
+            if (SetWaitableTimer(_timer.SafeWaitHandle, ref due, 0, 0, 0, false))
+            {
+                WaitHandle.WaitAny(_wake ??= new[] { _timer, _ct.WaitHandle });
+            }
+            else
+            {
+                if (!_delayFallbackLogged)
+                {
+                    _delayFallbackLogged = true;
+                    ServiceLog.Warn($"[frame-clock] high-resolution timer could not be armed (Win32 {Marshal.GetLastWin32Error()}); using a cancelable coarse wait");
+                }
+                _ct.WaitHandle.WaitOne(TimeSpan.FromMilliseconds(Math.Ceiling(delay.TotalMilliseconds)));
+            }
+        }
+        catch (ObjectDisposedException) { return false; }
         return !_ct.IsCancellationRequested;
     }
 

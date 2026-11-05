@@ -9,29 +9,33 @@ using Nexus.Service.Platform;
 namespace Nexus.Service.Peripherals.JungleLeopard;
 
 /// <summary>Adapts the synchronous coordinator contract to one identified D215 session's serial pump.</summary>
-internal sealed class D215StreamTransport : IStreamedPanelTransport, IRepeatGatedPanelTransport
+internal sealed class D215StreamTransport : IStreamedPanelTransport, IRepeatGatedPanelTransport, IOrientablePanelTransport
 {
     private static readonly TimeSpan StartTimeout = TimeSpan.FromSeconds(6);
     private readonly object _lock = new();
     private readonly Func<string, D215Session?> _lookup;
     private readonly Func<Func<bool>, D215BgraFrames> _makeFrames;
     private readonly TimeSpan _startTimeout;
+    private readonly int? _framesPerSecond;
     private Func<bool>? _repeatAllowed;
+    private Func<(bool Flip180, bool Mirror)>? _orientation;
     private Binding? _binding;
     private bool _disposed;
 
-    internal D215StreamTransport(string serial, D215ConnectionWorker worker, bool rotateLandscape = false)
-        : this(serial, worker.GetIdentifiedSession, mayRepeat => D215BgraFrames.Create(mayRepeat, rotateLandscape), StartTimeout)
+    internal D215StreamTransport(string serial, D215ConnectionWorker worker, bool rotateLandscape = false,
+        int framesPerSecond = D215Timing.FramesPerSecond)
+        : this(serial, worker.GetIdentifiedSession, mayRepeat => D215BgraFrames.Create(mayRepeat, rotateLandscape), StartTimeout, framesPerSecond)
     {
     }
 
     internal D215StreamTransport(string serial, Func<string, D215Session?> lookup,
-        Func<Func<bool>, D215BgraFrames> makeFrames, TimeSpan startTimeout)
+        Func<Func<bool>, D215BgraFrames> makeFrames, TimeSpan startTimeout, int? framesPerSecond = null)
     {
         Serial = serial;
         _lookup = lookup;
         _makeFrames = makeFrames;
         _startTimeout = startTimeout;
+        _framesPerSecond = framesPerSecond;
     }
 
     public string Serial { get; }
@@ -47,6 +51,8 @@ internal sealed class D215StreamTransport : IStreamedPanelTransport, IRepeatGate
 
     public void BindRepeatGate(Func<bool> allowed) => Volatile.Write(ref _repeatAllowed, allowed);
 
+    public void BindOrientation(Func<(bool Flip180, bool Mirror)> source) => Volatile.Write(ref _orientation, source);
+
     public void Open()
     {
         var session = _lookup(Serial);
@@ -56,6 +62,9 @@ internal sealed class D215StreamTransport : IStreamedPanelTransport, IRepeatGate
             if (_binding is not null) throw new InvalidOperationException("The D215 stream transport is already open.");
             if (session?.CanStream != true) throw new IOException("No identified D215 session is available for streaming.");
             var frames = _makeFrames(() => Volatile.Read(ref _repeatAllowed)?.Invoke() == true);
+            // D215 rotation uses the existing portrait/flip pair. Mirror was never
+            // supported on this panel and remains outside its rotation setting.
+            frames.BindFlip180(() => Volatile.Read(ref _orientation)?.Invoke().Flip180 == true);
             Volatile.Write(ref _binding, new Binding(session, frames));
         }
     }
@@ -80,7 +89,7 @@ internal sealed class D215StreamTransport : IStreamedPanelTransport, IRepeatGate
                 if (RemainingStartTime(startedAt) == TimeSpan.Zero)
                     throw new TimeoutException("The D215 player did not start within the startup budget.");
                 var binding = _binding!;
-                stream = binding.Stream ?? session.BeginStreaming(binding.Frames, () => ReferenceEquals(_lookup(Serial), session));
+                stream = binding.Stream ?? session.BeginStreaming(binding.Frames, () => ReferenceEquals(_lookup(Serial), session), _framesPerSecond);
                 Volatile.Write(ref _binding, binding with { Stream = stream });
             }
 

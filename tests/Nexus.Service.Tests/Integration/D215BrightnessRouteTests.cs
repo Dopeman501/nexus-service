@@ -70,12 +70,21 @@ public sealed class D215BrightnessRouteTests : IDisposable
     }
 
     [Theory]
+    [InlineData("{\"value\":0}")]
+    [InlineData("{\"value\":19}")]
+    [InlineData("{\"value\":21}")]
+    [InlineData("{\"value\":39}")]
+    [InlineData("{\"value\":41}")]
+    [InlineData("{\"value\":59}")]
+    [InlineData("{\"value\":61}")]
+    [InlineData("{\"value\":101}")]
+    [InlineData("{\"value\":20.5}")]
     [InlineData("{\"value\":90}")]
     [InlineData("{\"value\":null}")]
     [InlineData("{}")]
     [InlineData("{\"value\":\"80\"}")]
     [InlineData("{\"value\":80,\"port\":\"COM1\"}")]
-    public async Task Only_numeric_tested_presets_are_accepted(string body)
+    public async Task Only_numeric_presets_are_accepted(string body)
     {
         using var client = DesktopClient();
         using var response = await client.PostAsync("/panel/devices/unknown/d215-brightness",
@@ -130,9 +139,13 @@ public sealed class D215BrightnessRouteTests : IDisposable
     }
 
     [Theory]
-    [InlineData(false, "confirmed", 100)]
-    [InlineData(true, "mismatch", 80)]
-    public async Task Active_record_returns_the_device_readback_without_persisting_it(bool ignoreWrite, string status, int readback)
+    [InlineData(20, false, "confirmed", 20)]
+    [InlineData(40, false, "confirmed", 40)]
+    [InlineData(60, false, "confirmed", 60)]
+    [InlineData(80, false, "confirmed", 80)]
+    [InlineData(100, false, "confirmed", 100)]
+    [InlineData(100, true, "mismatch", 80)]
+    public async Task Active_record_returns_the_device_readback_without_persisting_it(int value, bool ignoreWrite, string status, int readback)
     {
         using var client = DesktopClient();
         var worker = _factory.Services.GetRequiredService<D215ConnectionWorker>();
@@ -148,13 +161,14 @@ public sealed class D215BrightnessRouteTests : IDisposable
 
             await AssertBrightness(await client.GetAsync(route), "confirmed", 80);
             _port.IgnoreBrightnessWrite = ignoreWrite;
-            await AssertBrightness(await client.PostAsJsonAsync(route, new { value = 100 }), status, readback);
-            Assert.Equal(1, _port.BrightnessWrites);
+            await AssertBrightness(await client.PostAsJsonAsync(route, new { value }), status, readback);
+            var expectedWrites = value == 80 ? 0 : 1;
+            Assert.Equal(expectedWrites, _port.BrightnessWrites);
             Assert.Null(Registry.Get(record)?.LcdBrightness);
 
             Assert.True(Registry.Remove(record));
             await AssertBrightness(await client.PostAsJsonAsync(route, new { value = 80 }), "unavailable", null);
-            Assert.Equal(1, _port.BrightnessWrites);
+            Assert.Equal(expectedWrites, _port.BrightnessWrites);
         }
         finally
         {
@@ -192,6 +206,94 @@ public sealed class D215BrightnessRouteTests : IDisposable
     }
 
     [Fact]
+    public async Task All_four_rotations_persist_atomically_without_replacing_the_panel_or_lease()
+    {
+        using var client = DesktopClient();
+        var worker = _factory.Services.GetRequiredService<D215ConnectionWorker>();
+        var streams = _factory.Services.GetRequiredService<StreamedPanelCoordinator>();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        try
+        {
+            var record = await AttachAsync(worker, streams, deadline.Token);
+            var lease = worker.GetIdentifiedSession("itest-d215");
+            foreach (var (portrait, flip180, width, height) in new[]
+            {
+                (false, false, 1680, 756), (false, true, 1680, 756),
+                (true, false, 756, 1680), (true, true, 756, 1680),
+            })
+            {
+                using var response = await client.PostAsJsonAsync($"/panel/devices/{record}",
+                    new { portrait, flip180 }, deadline.Token);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                using var saved = JsonDocument.Parse(await response.Content.ReadAsStringAsync(deadline.Token));
+                Assert.Equal(portrait, saved.RootElement.GetProperty("portrait").GetBoolean());
+                Assert.Equal(flip180, saved.RootElement.GetProperty("flip180").GetBoolean());
+
+                streams.TickOnce();
+                var assignment = Assert.Single(streams.GetAssignments().Assignments);
+                Assert.Equal(record, assignment.PanelDeviceId);
+                Assert.Equal((width, height), (assignment.CssWidth, assignment.CssHeight));
+                Assert.Equal(portrait, Registry.Get(record)?.Portrait);
+                Assert.Equal(flip180, Registry.Get(record)?.Flip180);
+                Assert.Same(lease, worker.GetIdentifiedSession("itest-d215"));
+            }
+        }
+        finally
+        {
+            await streams.StopAsync(CancellationToken.None);
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
+    public async Task Frame_cap_changes_remint_the_renderer_at_up_to_sixty_without_replacing_the_panel_or_lease()
+    {
+        using var client = DesktopClient();
+        var worker = _factory.Services.GetRequiredService<D215ConnectionWorker>();
+        var streams = _factory.Services.GetRequiredService<StreamedPanelCoordinator>();
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        try
+        {
+            var record = await AttachAsync(worker, streams, deadline.Token);
+            var lease = worker.GetIdentifiedSession("itest-d215");
+            var previous = Assert.Single(streams.GetAssignments().Assignments);
+            Assert.Equal(60, previous.Fps);
+            foreach (var (cap, expected) in new[] { (15, 15), (1, 1), (60, 60), (5, 5), (0, 60), (120, 60) })
+            {
+                using var response = await client.PostAsJsonAsync($"/panel/devices/{record}", new { fpsCap = cap }, deadline.Token);
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                streams.TickOnce();
+                var current = Assert.Single(streams.GetAssignments().Assignments);
+                Assert.Equal(expected, current.Fps);
+                Assert.Equal(record, current.PanelDeviceId);
+                Assert.Same(lease, worker.GetIdentifiedSession("itest-d215"));
+                if (previous.Fps != expected) Assert.NotEqual(previous.SessionId, current.SessionId);
+                Assert.Equal(cap == 0 ? null : (int?)cap, Registry.Get(record)?.FpsCap);
+                previous = current;
+            }
+            using var lower = await client.PostAsJsonAsync($"/panel/devices/{record}", new { fpsCap = 15 }, deadline.Token);
+            Assert.Equal(HttpStatusCode.OK, lower.StatusCode);
+            var gate = _factory.Services.GetRequiredService<DeviceControlGate>();
+            gate.SetEnabled(Family, false);
+            while (worker.Snapshot.Status != D215ConnectionStatus.Available) await Task.Delay(10, deadline.Token);
+            streams.TickOnce();
+            Assert.Empty(streams.GetAssignments().Assignments);
+            gate.SetEnabled(Family, true);
+            while (worker.Snapshot.Status != D215ConnectionStatus.Identified) await Task.Delay(10, deadline.Token);
+            streams.TickOnce();
+            var reconnected = Assert.Single(streams.GetAssignments().Assignments);
+            Assert.Equal(record, reconnected.PanelDeviceId);
+            Assert.Equal(15, reconnected.Fps);
+            Assert.NotSame(lease, worker.GetIdentifiedSession("itest-d215"));
+        }
+        finally
+        {
+            await streams.StopAsync(CancellationToken.None);
+            await worker.StopAsync(CancellationToken.None);
+        }
+    }
+
+    [Fact]
     public async Task Orientation_restarts_the_stream_and_keeps_the_record_playlist_and_brightness_route()
     {
         using var client = DesktopClient();
@@ -203,7 +305,7 @@ public sealed class D215BrightnessRouteTests : IDisposable
             var record = await AttachAsync(worker, streams, deadline.Token);
             var lease = Assert.IsType<D215Session>(worker.GetIdentifiedSession("itest-d215"));
             var portrait = Assert.Single(streams.GetAssignments().Assignments);
-            Assert.Equal((756, 1680, 5, "rawBgra"), (portrait.CssWidth, portrait.CssHeight, portrait.Fps, portrait.Codec));
+            Assert.Equal((756, 1680, 60, "rawBgra"), (portrait.CssWidth, portrait.CssHeight, portrait.Fps, portrait.Codec));
             Assert.Null(Registry.Get(record)?.Portrait);
             var route = $"/panel/devices/{record}";
             string[] playlist = ["second-media", "first-media"];
@@ -216,7 +318,7 @@ public sealed class D215BrightnessRouteTests : IDisposable
             Assert.Equal(record, landscape.PanelDeviceId);
             Assert.Same(lease, worker.GetIdentifiedSession("itest-d215"));
             Assert.NotEqual(portrait.SessionId, landscape.SessionId);
-            Assert.Equal((1680, 756, 5, "rawBgra"), (landscape.CssWidth, landscape.CssHeight, landscape.Fps, landscape.Codec));
+            Assert.Equal((1680, 756, 60, "rawBgra"), (landscape.CssWidth, landscape.CssHeight, landscape.Fps, landscape.Codec));
             var wideRecord = Assert.IsType<PanelDeviceRecord>(Registry.Get(record));
             Assert.Equal("lcd-wide", wideRecord.Capabilities?.Surface);
             Assert.True(wideRecord.Capabilities?.SupportsPortrait);
@@ -243,7 +345,7 @@ public sealed class D215BrightnessRouteTests : IDisposable
             Assert.Equal(record, restored.PanelDeviceId);
             Assert.Same(lease, worker.GetIdentifiedSession("itest-d215"));
             Assert.NotEqual(landscape.SessionId, restored.SessionId);
-            Assert.Equal((756, 1680, 5), (restored.CssWidth, restored.CssHeight, restored.Fps));
+            Assert.Equal((756, 1680, 60), (restored.CssWidth, restored.CssHeight, restored.Fps));
             Assert.Equal("lcd-portrait", Registry.Get(record)?.Capabilities?.Surface);
             Assert.Equal(playlist, Registry.Get(record)?.BackgroundMediaOrder);
         }

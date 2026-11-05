@@ -220,9 +220,13 @@ public sealed class D215LiveStreamTests
     }
 
     [Theory]
-    [InlineData(100, "confirmed")]
-    [InlineData(80, "mismatch")]
-    public async Task Brightness_pauses_packets_reports_readback_and_resumes_live(int readback, string status)
+    [InlineData(20, 20, "confirmed", "55AA080003141E01")]
+    [InlineData(40, 40, "confirmed", "55AA080003283201")]
+    [InlineData(60, 60, "confirmed", "55AA0800033C4601")]
+    [InlineData(80, 80, "confirmed", "55AA080003505A01")]
+    [InlineData(100, 100, "confirmed", "55AA080003646E01")]
+    [InlineData(100, 80, "mismatch", "55AA080003646E01")]
+    public async Task Brightness_pauses_packets_reports_readback_and_resumes_live(int value, int readback, string status, string request)
     {
         var transport = new FakeTransport { BlockFrame = true };
         var confirmed = new List<int?>();
@@ -230,15 +234,16 @@ public sealed class D215LiveStreamTests
         try
         {
             await StartAndAwaitFrame(transport, stream);
-            var result = stream.SetBrightnessAsync(100, () => true, CancellationToken.None).AsTask();
+            var result = stream.SetBrightnessAsync(value, () => true, CancellationToken.None).AsTask();
             var busy = await stream.SetBrightnessAsync(80, () => true, CancellationToken.None);
             Assert.Equal("busy", busy.Status);
             Assert.False(transport.HasWrite);
             transport.ReleaseFrame.TrySetResult();
 
             await ExpectClearThenInfo(transport);
-            transport.Reply(InfoFrame(80));
-            Assert.Equal("55AA080003646E01", await transport.NextWrite());
+            var before = value == 80 ? 100 : 80;
+            transport.Reply(InfoFrame(before));
+            Assert.Equal(request, await transport.NextWrite());
             transport.Reply("55AA080003000A01");
             Assert.Equal("55AA0700060C01", await transport.NextWrite());
             Assert.False(result.IsCompleted);
@@ -247,7 +252,7 @@ public sealed class D215LiveStreamTests
             var outcome = await result.WaitAsync(TestTimeout);
             Assert.Equal(status, outcome.Status);
             Assert.Equal(readback, outcome.Value);
-            Assert.Equal(new int?[] { 80, null, readback }, confirmed);
+            Assert.Equal(new int?[] { before, null, readback }, confirmed);
             Assert.Equal(EnterLive, await transport.NextWrite());
             transport.Reply("55AA080011001801");
         }
