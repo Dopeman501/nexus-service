@@ -29,6 +29,7 @@ public sealed class PanelDeviceRecord : IPanelPersonalization
     public string? BackgroundColor { get; set; }
     public string? BackgroundColorLight { get; set; }
     public string? BackgroundMode { get; set; }
+    public PanelAudioTriggerDto? BackgroundAudioTrigger { get; set; }
     public string? BackgroundEffect { get; set; }
     public int? BackgroundTemplate { get; set; }
     /// <summary>
@@ -273,6 +274,7 @@ public interface IPanelPersonalization
     string? BackgroundColor { get; set; }
     string? BackgroundColorLight { get; set; }
     string? BackgroundMode { get; set; }
+    PanelAudioTriggerDto? BackgroundAudioTrigger { get; set; }
     string? BackgroundEffect { get; set; }
     int? BackgroundTemplate { get; set; }
     Dictionary<string, int>? BackgroundTemplates { get; set; }
@@ -320,6 +322,7 @@ public sealed class PanelPreset : IAppBoundPreset, IPanelPersonalization
     public string? BackgroundColor { get; set; }
     public string? BackgroundColorLight { get; set; }
     public string? BackgroundMode { get; set; }
+    public PanelAudioTriggerDto? BackgroundAudioTrigger { get; set; }
     public string? BackgroundEffect { get; set; }
     public int? BackgroundTemplate { get; set; }
     public Dictionary<string, int>? BackgroundTemplates { get; set; }
@@ -439,6 +442,7 @@ public sealed class PanelDevicePatch
     public string? BackgroundColor { get; set; }
     public string? BackgroundColorLight { get; set; }
     public string? BackgroundMode { get; set; }
+    public PanelAudioTriggerDto? BackgroundAudioTrigger { get; set; }
     public string? BackgroundEffect { get; set; }
     public int? BackgroundTemplate { get; set; }
     /// <summary>Full per-shader preset map to replace this panel's selection

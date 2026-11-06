@@ -362,6 +362,8 @@ public static class PanelRoutes
 
         app.MapPost("/panel/devices/{id}", (string id, PanelDevicePatch body, HttpContext ctx, PanelDeviceRegistry registry, MultiplexHub hub, TokenService tokens, Nexus.Service.Panel.Streams.StreamedPanelCoordinator streams, Nexus.Service.Deck.ListedAppIds listed, Nexus.Service.Widgets.AppRegistry apps, Nexus.Service.Telemetry.ITelemetry telemetry) =>
         {
+            if (!PanelAudioTriggerPolicy.IsValid(body.BackgroundAudioTrigger))
+                return Results.BadRequest(ApiResponse.Fail("invalid_background_audio_trigger"));
             var existing = body.Capabilities is not null || body.LcdBrightness.HasValue || body.Portrait.HasValue
                 || body.Layout?.D215Panels is not null || body.Layout?.D215Widget is not null
                 ? registry.Get(id)

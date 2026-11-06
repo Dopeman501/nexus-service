@@ -93,6 +93,7 @@ namespace Nexus.Service.Serialization;
 [JsonSerializable(typeof(PanelSettings))]
 [JsonSerializable(typeof(Nexus.Service.Models.Panel.PanelPreset))]
 [JsonSerializable(typeof(Nexus.Service.Models.Panel.PanelDeviceRecord))]
+[JsonSerializable(typeof(Nexus.Service.Models.Panel.PanelAudioTriggerDto))]
 [JsonSerializable(typeof(Nexus.Service.Panel.UsbMonitorPanelPair))]
 [JsonSerializable(typeof(System.Collections.Generic.List<Nexus.Service.Panel.UsbMonitorPanelPair>))]
 [JsonSerializable(typeof(LegacyOverlaySettings))]

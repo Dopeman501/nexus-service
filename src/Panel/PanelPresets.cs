@@ -35,6 +35,7 @@ public static class PanelPresets
         to.BackgroundColor = from.BackgroundColor;
         to.BackgroundColorLight = from.BackgroundColorLight;
         to.BackgroundMode = from.BackgroundMode;
+        to.BackgroundAudioTrigger = PanelAudioTriggerPolicy.Clone(from.BackgroundAudioTrigger);
         to.BackgroundEffect = from.BackgroundEffect;
         to.BackgroundTemplate = from.BackgroundTemplate;
         to.BackgroundTemplates = from.BackgroundTemplates is null ? null : new Dictionary<string, int>(from.BackgroundTemplates);

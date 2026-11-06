@@ -752,6 +752,8 @@ public sealed class PanelDeviceRegistry
     {
         if (string.IsNullOrWhiteSpace(id) || patch is null)
             return null;
+        if (!PanelAudioTriggerPolicy.IsValid(patch.BackgroundAudioTrigger))
+            throw new ArgumentException("invalid_background_audio_trigger", nameof(patch));
 
         PanelDeviceRecord? snapshot = null;
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -778,6 +780,8 @@ public sealed class PanelDeviceRegistry
                 record.BackgroundColorLight = NullIfEmpty(patch.BackgroundColorLight);
             if (patch.BackgroundMode is not null)
                 record.BackgroundMode = NullIfEmpty(patch.BackgroundMode);
+            if (patch.BackgroundAudioTrigger is not null)
+                record.BackgroundAudioTrigger = PanelAudioTriggerPolicy.Clone(patch.BackgroundAudioTrigger);
             if (patch.BackgroundEffect is not null)
                 record.BackgroundEffect = NullIfEmpty(Nexus.Service.Lighting.SimplePatternMigration.Normalize(patch.BackgroundEffect));
             if (patch.BackgroundTemplate.HasValue)
@@ -933,6 +937,7 @@ public sealed class PanelDeviceRegistry
             record.BackgroundColor = null;
             record.BackgroundColorLight = null;
             record.BackgroundMode = null;
+            record.BackgroundAudioTrigger = null;
             record.BackgroundEffect = null;
             record.BackgroundTemplate = null;
             record.BackgroundTemplates = null;
@@ -1291,6 +1296,7 @@ public sealed class PanelDeviceRegistry
             BackgroundColor = r.BackgroundColor,
             BackgroundColorLight = r.BackgroundColorLight,
             BackgroundMode = r.BackgroundMode,
+            BackgroundAudioTrigger = PanelAudioTriggerPolicy.Clone(r.BackgroundAudioTrigger),
             BackgroundEffect = r.BackgroundEffect,
             BackgroundTemplate = r.BackgroundTemplate,
             BackgroundTemplates = r.BackgroundTemplates is null
