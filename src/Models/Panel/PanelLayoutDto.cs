@@ -44,6 +44,9 @@ public sealed class PanelLayoutDto
     /// <summary>Independent circular widget composition for the D215. The ordinary widget layout remains intact.</summary>
     public D215PanelsDto? D215Panels { get; set; }
 
+    /// <summary>Independent visibility and aspect-preserving transform of the D215's ordinary Widget. Null retains legacy visibility defaults.</summary>
+    public D215WidgetDto? D215Widget { get; set; }
+
     /// <summary>
     /// Id of the widget the panel opens straight into immersive view on load,
     /// skipping the dashboard. At most one per layout, and it must live on the

@@ -56,7 +56,9 @@ public sealed class D215PanelsPersistenceTests : IDisposable
     [Fact]
     public void Source_generated_wire_and_settings_roundtrips_keep_independent_instances_and_the_legacy_playlist()
     {
-        var wire = JsonSerializer.Serialize(Layout(Circle(), Circle("circle-2", "monitoring")), AppJsonContext.Default.PanelLayoutDto);
+        var composed = Layout(Circle(), Circle("circle-2", "monitoring"));
+        composed.D215Widget = new() { Enabled = false, X = 0.3, Y = 0.6, Scale = 0.45 };
+        var wire = JsonSerializer.Serialize(composed, AppJsonContext.Default.PanelLayoutDto);
         var fromWire = JsonSerializer.Deserialize(wire, AppJsonContext.Default.PanelLayoutDto)!;
         var settings = new NexusSettings();
         settings.PanelDevices["d215"] = Record(fromWire);
@@ -69,6 +71,8 @@ public sealed class D215PanelsPersistenceTests : IDisposable
         Assert.Equal("analog", reloaded.D215Panels.Items[0].Config!["design"].GetString());
         Assert.Equal("base-clock", reloaded.Pages[0].Widgets[0].Id);
         Assert.Equal(new[] { "clock", "weather" }, reloaded.WidgetPlaylist!.Types);
+        Assert.False(reloaded.D215Widget!.Enabled);
+        Assert.Equal((0.3, 0.6, 0.45), (reloaded.D215Widget.X, reloaded.D215Widget.Y, reloaded.D215Widget.Scale));
     }
 
     [Fact]
@@ -76,17 +80,21 @@ public sealed class D215PanelsPersistenceTests : IDisposable
     {
         var layout = JsonSerializer.Deserialize("""{"surface":"lcd-wide","pages":[]}""", AppJsonContext.Default.PanelLayoutDto)!;
         Assert.Null(layout.D215Panels);
+        Assert.Null(layout.D215Widget);
     }
 
     [Fact]
     public void Preset_clone_owns_its_geometry_and_instance_configs()
     {
         var source = Layout(Circle());
+        source.D215Widget = new() { Enabled = true, X = 0.4, Y = 0.6, Scale = 0.5 };
         var clone = PanelPresets.CloneLayout(source)!;
         clone.D215Panels!.Items[0].X = 0.9;
         clone.D215Panels.Items[0].Config!["design"] = Json("\"digital\"");
+        clone.D215Widget!.Scale = 0.8;
         Assert.Equal(0.25, source.D215Panels!.Items[0].X);
         Assert.Equal("analog", source.D215Panels.Items[0].Config!["design"].GetString());
+        Assert.Equal(0.5, source.D215Widget.Scale);
     }
 
     [Theory]
@@ -96,7 +104,9 @@ public sealed class D215PanelsPersistenceTests : IDisposable
     {
         var source = new NexusSettings();
         source.PanelDevices["d215"] = Record(Layout(Circle()));
+        source.PanelDevices["d215"].Layout!.D215Widget = new() { Enabled = true, X = 0.4, Y = 0.6, Scale = 0.5 };
         source.PanelDevices["d215"].Presets = [new() { Id = "saved", Name = "Saved", Layout = Layout(Circle("saved-circle")) }];
+        source.PanelDevices["d215"].Presets![0].Layout!.D215Widget = new() { Enabled = false, X = 0.3, Y = 0.6, Scale = 0.7 };
         var file = ProfileSharing.ExtractShareable(source);
         Assert.NotNull(file.PanelDevices["d215"].Layout!.D215Panels);
         var live = new NexusSettings();
@@ -107,8 +117,11 @@ public sealed class D215PanelsPersistenceTests : IDisposable
         var target = live.PanelDevices["d215"];
         Assert.Equal(d215, target.Layout!.D215Panels is not null);
         Assert.Equal(d215, target.Presets![0].Layout!.D215Panels is not null);
+        Assert.Equal(d215, target.Layout.D215Widget is not null);
+        Assert.Equal(d215, target.Presets[0].Layout!.D215Widget is not null);
         Assert.Equal("base-clock", target.Layout.Pages[0].Widgets[0].Id);
         Assert.NotNull(file.PanelDevices["d215"].Layout!.D215Panels);
+        Assert.NotNull(file.PanelDevices["d215"].Layout!.D215Widget);
     }
 
     [Fact]

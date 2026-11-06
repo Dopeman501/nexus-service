@@ -180,6 +180,47 @@ public sealed class D215PanelsRouteTests : IDisposable
         Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
     }
 
+    [Theory]
+    [InlineData("app:", true, true)]
+    [InlineData("marketplace:", true, true)]
+    [InlineData("app:", true, false)]
+    [InlineData("app:", false, true)]
+    public async Task A_single_instance_SDK_app_cannot_join_a_visible_widget_playlist_and_a_circle(string prefix, bool widgetEnabled, bool playlistEnabled)
+    {
+        InstallApp("example.round", single: true);
+        using var client = Client();
+        var body = Body("[" + Item(type: "app:example.round") + "]");
+        var metadata = ",\"d215Widget\":{\"enabled\":" + widgetEnabled.ToString().ToLowerInvariant()
+            + ",\"x\":0.5,\"y\":0.5,\"scale\":0.5},\"widgetPlaylist\":{\"enabled\":" + playlistEnabled.ToString().ToLowerInvariant()
+            + ",\"types\":[\"clock\",\"" + prefix + "example.round\",\"" + prefix + "example.round\"]}";
+        body = body[..^2] + metadata + "}}";
+        using var response = await Post(client, Record(), body);
+        Assert.Equal(widgetEnabled && playlistEnabled ? HttpStatusCode.BadRequest : HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Legacy_exclusive_Panels_layout_keeps_a_retained_enabled_playlist_without_a_Widget_visibility_override()
+    {
+        InstallApp("example.round", single: true);
+        using var client = Client();
+        var body = Body("[" + Item(type: "app:example.round") + "]");
+        body = body[..^2] + ",\"widgetPlaylist\":{\"enabled\":true,\"types\":[\"clock\",\"app:example.round\"]}}}";
+        using var response = await Post(client, Record(), body);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Repeated_single_instance_types_in_the_one_Widget_playlist_are_not_duplicate_instances()
+    {
+        InstallApp("example.round", single: true);
+        using var client = Client();
+        var body = Body("[" + Item() + "]");
+        body = body[..^2] + ",\"d215Widget\":{\"enabled\":true,\"x\":0.5,\"y\":0.5,\"scale\":1},"
+            + "\"widgetPlaylist\":{\"enabled\":true,\"types\":[\"app:example.round\",\"app:example.round\"]}}}";
+        using var response = await Post(client, Record(), body);
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
     [Fact]
     public async Task Each_panel_background_and_the_switch_roundtrip_without_replacing_the_shared_background()
     {

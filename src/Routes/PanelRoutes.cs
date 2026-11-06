@@ -362,7 +362,8 @@ public static class PanelRoutes
 
         app.MapPost("/panel/devices/{id}", (string id, PanelDevicePatch body, HttpContext ctx, PanelDeviceRegistry registry, MultiplexHub hub, TokenService tokens, Nexus.Service.Panel.Streams.StreamedPanelCoordinator streams, Nexus.Service.Deck.ListedAppIds listed, Nexus.Service.Widgets.AppRegistry apps, Nexus.Service.Telemetry.ITelemetry telemetry) =>
         {
-            var existing = body.Capabilities is not null || body.LcdBrightness.HasValue || body.Portrait.HasValue || body.Layout?.D215Panels is not null
+            var existing = body.Capabilities is not null || body.LcdBrightness.HasValue || body.Portrait.HasValue
+                || body.Layout?.D215Panels is not null || body.Layout?.D215Widget is not null
                 ? registry.Get(id)
                 : null;
             var hostOwnedD215 = PanelDeviceRegistry.IsHostOwnedD215(existing?.Capabilities);
@@ -370,8 +371,8 @@ public static class PanelRoutes
                 return Results.BadRequest(ApiResponse.Fail("D215 panel capabilities are set by the service"));
             if (body.LcdBrightness.HasValue && hostOwnedD215)
                 return Results.BadRequest(ApiResponse.Fail("D215 brightness requires a confirmed hardware change"));
-            if (body.Layout is { D215Panels: not null } circles
-                && !D215PanelsPolicy.IsValid(circles, existing?.Capabilities, apps, existing?.Layout))
+            if (body.Layout is { } composition && (composition.D215Panels is not null || composition.D215Widget is not null)
+                && !D215PanelsPolicy.IsValid(composition, existing?.Capabilities, apps, existing?.Layout))
             {
                 return Results.BadRequest(ApiResponse.Fail("invalid_d215_panels"));
             }

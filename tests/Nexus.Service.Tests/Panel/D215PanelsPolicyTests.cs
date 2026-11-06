@@ -72,4 +72,49 @@ public sealed class D215PanelsPolicyTests
         Assert.True(D215PanelsPolicy.IsValid(legacy, null, Apps, null));
         Assert.Same(legacy, D215PanelsPolicy.ForTarget(legacy, null));
     }
+
+    [Theory]
+    [InlineData(double.NaN, 0.5, 0.4)]
+    [InlineData(double.PositiveInfinity, 0.5, 0.4)]
+    [InlineData(0.5, double.NaN, 0.4)]
+    [InlineData(0.5, double.NegativeInfinity, 0.4)]
+    [InlineData(0.5, 0.5, double.NaN)]
+    [InlineData(0.5, 0.5, double.PositiveInfinity)]
+    public void Nonfinite_Widget_geometry_is_rejected_without_a_circle_collection(double x, double y, double scale)
+    {
+        var layout = new PanelLayoutDto { D215Widget = new() { Enabled = true, X = x, Y = y, Scale = scale } };
+        Assert.False(D215PanelsPolicy.IsValid(layout, Target, Apps, null));
+    }
+
+    [Theory]
+    [InlineData(0, 0, 0.12)]
+    [InlineData(1, 1, 1)]
+    public void Widget_endpoint_geometry_is_valid_without_a_circle_collection(double x, double y, double scale)
+    {
+        var layout = new PanelLayoutDto { D215Widget = new() { Enabled = false, X = x, Y = y, Scale = scale } };
+        Assert.True(D215PanelsPolicy.IsValid(layout, Target, Apps, null));
+        Assert.Same(layout, D215PanelsPolicy.ForTarget(layout, Target));
+    }
+
+    [Fact]
+    public void Invalid_Widget_import_metadata_does_not_discard_valid_circles()
+    {
+        var original = Layout();
+        original.D215Widget = new() { Enabled = true, X = 0.5, Y = 0.5, Scale = 1.1 };
+        var sanitized = D215PanelsPolicy.ForTarget(original, Target)!;
+        Assert.Null(sanitized.D215Widget);
+        Assert.Single(sanitized.D215Panels!.Items);
+        Assert.NotNull(original.D215Widget);
+    }
+
+    [Fact]
+    public void Invalid_circle_import_metadata_does_not_discard_a_valid_Widget()
+    {
+        var original = Layout(diameter: 1.1);
+        original.D215Widget = new() { Enabled = true, X = 0.5, Y = 0.5, Scale = 0.6 };
+        var sanitized = D215PanelsPolicy.ForTarget(original, Target)!;
+        Assert.Null(sanitized.D215Panels);
+        Assert.Equal(0.6, sanitized.D215Widget!.Scale);
+        Assert.NotNull(original.D215Panels);
+    }
 }

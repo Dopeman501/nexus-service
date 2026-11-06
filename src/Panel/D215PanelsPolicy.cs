@@ -22,12 +22,20 @@ internal static class D215PanelsPolicy
 
     internal static bool IsValid(PanelLayoutDto layout, PanelDeviceCapabilities? capabilities, AppRegistry apps, PanelLayoutDto? stored)
     {
+        if (layout.D215Panels is null && layout.D215Widget is null) return true;
+        if (!IsD215(capabilities) || !ValidWidget(layout.D215Widget)
+            || (layout.D215Panels is not null && !ValidStructure(layout)))
+        {
+            return false;
+        }
         if (layout.D215Panels is null) return true;
-        if (!IsD215(capabilities) || !ValidStructure(layout)) return false;
-        var pageApps = (layout.Pages?.SelectMany(page => page?.Widgets ?? []) ?? [])
-            .Where(widget => widget is not null)
-            .Select(widget => WidgetSettingsService.MarketplaceIdFromType(AppPrefixMigration.Rewrite(widget.Type))).OfType<string>();
-        var singleInstances = new HashSet<string>(pageApps, StringComparer.Ordinal);
+        var widgetTypes = (layout.Pages?.SelectMany(page => page?.Widgets ?? []) ?? [])
+            .Where(widget => widget is not null).Select(widget => widget.Type);
+        var widgetEnabled = layout.D215Widget?.Enabled ?? !layout.D215Panels.Enabled;
+        if (widgetEnabled && layout.WidgetPlaylist?.Enabled == true)
+            widgetTypes = widgetTypes.Concat(layout.WidgetPlaylist.Types ?? []);
+        var widgetApps = widgetTypes.Select(type => WidgetSettingsService.MarketplaceIdFromType(AppPrefixMigration.Rewrite(type))).OfType<string>();
+        var singleInstances = new HashSet<string>(widgetApps, StringComparer.Ordinal);
         foreach (var item in layout.D215Panels.Items)
         {
             var appId = WidgetSettingsService.MarketplaceIdFromType(item.Type);
@@ -74,12 +82,22 @@ internal static class D215PanelsPolicy
         && (!manifest.Surfaces.Any(Surfaces.Contains)
             || manifest.Surfaces.Any(surface => PanelSurfaces.Canonical(surface) == PanelSurfaces.LcdRound));
 
+    private static bool ValidWidget(D215WidgetDto? widget) => widget is null
+        || (double.IsFinite(widget.X) && widget.X is >= 0 and <= 1
+            && double.IsFinite(widget.Y) && widget.Y is >= 0 and <= 1
+            && double.IsFinite(widget.Scale) && widget.Scale is >= 0.12 and <= 1);
+
     /// <summary>Imported looks remain portable, but malformed or foreign-device compositions never reach a live target.</summary>
     internal static PanelLayoutDto? ForTarget(PanelLayoutDto? layout, PanelDeviceCapabilities? capabilities)
     {
-        if (layout?.D215Panels is null || (IsD215(capabilities) && ValidStructure(layout))) return layout;
+        if (layout is null) return null;
+        var targetIsD215 = IsD215(capabilities);
+        var keepPanels = layout.D215Panels is null || (targetIsD215 && ValidStructure(layout));
+        var keepWidget = layout.D215Widget is null || (targetIsD215 && ValidWidget(layout.D215Widget));
+        if (keepPanels && keepWidget) return layout;
         var safe = PanelPresets.CloneLayout(layout)!;
-        safe.D215Panels = null;
+        if (!keepPanels) safe.D215Panels = null;
+        if (!keepWidget) safe.D215Widget = null;
         return safe;
     }
 }
