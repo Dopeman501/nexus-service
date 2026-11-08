@@ -241,9 +241,14 @@ public static class LightingRoutes
             {
                 // Read through the store so the first request after a boot sees the persisted source.
                 var entry = custom.Get(name[ShaderLibrary.CustomPrefix.Length..]);
-                return entry is null
-                    ? Results.NotFound()
-                    : Results.Json(ToShaderSource(entry.Frag, Nexus.Service.Lighting.Engine.Gpu.SensorUniformSpec.Parse(entry.Frag)), AppJsonContext.Default.ShaderSourceResponse);
+                if (entry is null)
+                {
+                    return Results.NotFound();
+                }
+                // Compose one store snapshot so a concurrent edit/delete cannot
+                // mix source and sensors or unregister the key between reads.
+                var frag = CustomPatternShader.Compose(entry.Frag);
+                return Results.Json(ToShaderSource(frag, Nexus.Service.Lighting.Engine.Gpu.SensorUniformSpec.Parse(frag)), AppJsonContext.Default.ShaderSourceResponse);
             }
             if (!ShaderLibrary.AllEffectKeys.Contains(name))
                 return Results.NotFound();
@@ -653,7 +658,7 @@ public static class LightingRoutes
             {
                 return CustomEffectError(linkProblem);
             }
-            var compileError = compile(body.Frag!);
+            var compileError = compile(CustomPatternShader.Compose(body.Frag!));
             if (compileError is not null)
             {
                 return CustomEffectError(compileError);

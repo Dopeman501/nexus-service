@@ -11,13 +11,17 @@ public sealed class CustomShaderLibraryTests : IDisposable
     public void Dispose() => ShaderLibrary.UnregisterCustom(_id);
 
     [Fact]
-    public void Get_returns_the_stored_source_as_is_without_the_prelude()
+    public void Get_adds_shared_spatial_controls_without_the_builtin_prelude()
     {
         var frag = CustomFrags.Frag();
         ShaderLibrary.RegisterCustom(_id, frag);
 
-        Assert.Equal(frag, ShaderLibrary.Get(Key));
         Assert.StartsWith("#version 330 core", ShaderLibrary.Get(Key));
+        Assert.Contains("void main() { fragColor = vec4(vec3(u_b1_gain), 1.0); }", ShaderLibrary.Get(Key));
+        Assert.DoesNotContain("vec3 finalize(", ShaderLibrary.Get(Key));
+        var specs = ShaderLibrary.Params(Key);
+        Assert.Equal(new ShaderParamSpec("u_background_rotation", 0, 360, 1, 0, true), specs["u_background_rotation"]);
+        Assert.Equal(new ShaderParamSpec("u_background_zoom", 0.1f, 3, 0.05f, 1, true), specs["u_background_zoom"]);
     }
 
     [Fact]
@@ -37,7 +41,7 @@ public sealed class CustomShaderLibraryTests : IDisposable
         var next = CustomFrags.Frag(gainDefault: 1.5f);
         ShaderLibrary.RegisterCustom(_id, next);
 
-        Assert.Equal(next, ShaderLibrary.Get(Key));
+        Assert.Contains("= 1.5", ShaderLibrary.Get(Key));
         Assert.Equal(1.5f, ShaderLibrary.Params(Key)["u_b1_gain"].Default);
         Assert.NotEqual(tag1, ShaderLibrary.SourceTag(Key));
     }
@@ -105,7 +109,7 @@ public sealed class CustomShaderLibraryTests : IDisposable
         var state = new AnimateEffectState
         {
             Speed = 400,
-            Params = new() { ["u_b1_gain"] = 9f, ["u_unknown"] = 7f },
+            Params = new() { ["u_b1_gain"] = 9f, ["u_unknown"] = 7f, ["u_background_rotation"] = 900, ["u_background_zoom"] = 9 },
         };
 
         ShaderParamSpec.Sanitize(Key, state);
@@ -113,6 +117,8 @@ public sealed class CustomShaderLibraryTests : IDisposable
         Assert.Equal(2f, state.Params["u_b1_gain"]);
         Assert.Equal(7f, state.Params["u_unknown"]);
         Assert.Equal(200, state.Speed);
+        Assert.Equal(360f, state.Params["u_background_rotation"]);
+        Assert.Equal(3f, state.Params["u_background_zoom"]);
     }
 
     [Fact]

@@ -36,7 +36,8 @@ internal static class ShaderLibrary
     /// <summary>Key prefix of a user-made effect; the rest is the store id.</summary>
     public const string CustomPrefix = "custom:";
 
-    // User-made sources mirrored from CustomEffectStore. Self-contained shaders: no prelude.
+    // User-made runtime sources mirrored from CustomEffectStore. No built-in prelude;
+    // spatial composition is cached at registration and never rewrites the saved fragment.
     private static readonly ConcurrentDictionary<string, string> CustomSources = new(System.StringComparer.Ordinal);
     // Derived data per custom key, stamped with the source it was computed from; a read
     // whose stamp is not the current source recomputes, so stale data is never served.
@@ -50,7 +51,7 @@ internal static class ShaderLibrary
 
     public static void RegisterCustom(string id, string frag)
     {
-        CustomSources[id] = frag;
+        CustomSources[id] = CustomPatternShader.Compose(frag);
         CustomDerived.TryRemove(CustomPrefix + id, out _);
     }
 

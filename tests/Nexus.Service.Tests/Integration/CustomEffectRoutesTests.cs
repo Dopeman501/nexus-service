@@ -25,6 +25,7 @@ public sealed class CustomEffectAppFactory : NexusAppFactory
     public volatile string? CompileError;
 
     public int CompileCalls;
+    public string? LastCompiled;
 
     protected override void ConfigureWebHost(IWebHostBuilder builder)
     {
@@ -34,8 +35,9 @@ public sealed class CustomEffectAppFactory : NexusAppFactory
             services.RemoveAll<CustomEffectStore>();
             services.AddSingleton(new CustomEffectStore(Dir));
             services.RemoveAll<CustomFragCompiler>();
-            services.AddSingleton<CustomFragCompiler>(_ =>
+            services.AddSingleton<CustomFragCompiler>(frag =>
             {
+                LastCompiled = frag;
                 Interlocked.Increment(ref CompileCalls);
                 return CompileError;
             });
@@ -94,6 +96,7 @@ public sealed class CustomEffectRoutesTests : IClassFixture<CustomEffectAppFacto
         Assert.True(json.GetProperty("updatedAt").GetInt64() > 0);
         Assert.True(json.GetProperty("audio").GetBoolean());
         Assert.False(json.TryGetProperty("frag", out _));
+        Assert.Equal(ShaderLibrary.Get("custom:" + id), _factory.LastCompiled);
     }
 
     [Fact]
@@ -207,7 +210,8 @@ public sealed class CustomEffectRoutesTests : IClassFixture<CustomEffectAppFacto
         Assert.Equal(1.5f, ShaderLibrary.Params("custom:" + id)["u_b1_gain"].Default);
         Assert.NotEqual(tag1, ShaderLibrary.SourceTag("custom:" + id));
         var frag = await Read(await http.GetAsync("/lighting/shaders/custom:" + id));
-        Assert.Equal(CustomFrags.Frag(gainDefault: 1.5f), frag.GetProperty("frag").GetString());
+        Assert.Equal(ShaderLibrary.Get("custom:" + id), frag.GetProperty("frag").GetString());
+        Assert.Equal(CustomFrags.Frag(gainDefault: 1.5f), _factory.Services.GetRequiredService<CustomEffectStore>().Get(id)!.Frag);
     }
 
     [Fact]
@@ -221,7 +225,11 @@ public sealed class CustomEffectRoutesTests : IClassFixture<CustomEffectAppFacto
         var missing = await http.GetAsync("/lighting/shaders/custom:" + CustomFrags.NewId());
 
         Assert.Equal(HttpStatusCode.OK, ok.StatusCode);
-        Assert.Equal(CustomFrags.Frag(), (await Read(ok)).GetProperty("frag").GetString());
+        var source = (await Read(ok)).GetProperty("frag").GetString()!;
+        Assert.Equal(ShaderLibrary.Get("custom:" + id), source);
+        Assert.Contains("uniform float u_background_rotation;", source);
+        Assert.Contains("uniform float u_background_zoom;", source);
+        Assert.Equal(CustomFrags.Frag(), _factory.Services.GetRequiredService<CustomEffectStore>().Get(id)!.Frag);
         Assert.Equal(HttpStatusCode.NotFound, missing.StatusCode);
     }
 
