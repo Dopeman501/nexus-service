@@ -229,6 +229,25 @@ public sealed class MultiplexHub
     }
 
     /// <summary>
+    /// Deadline-bound fan-out for transient editor updates. Peers send independently,
+    /// and cancellation retires both a queued lock wait and an active socket send.
+    /// Existing broadcasters retain their original overload and behavior.
+    /// </summary>
+    public async Task BroadcastTopicAsync(string topic, ReadOnlyMemory<byte> envelope, CancellationToken cancellationToken)
+    {
+        var sends = new List<Task>();
+        foreach (var (_, client) in _clients)
+        {
+            if (client.IsSubscribed(topic))
+                sends.Add(client.SendAsync(envelope, WebSocketMessageType.Text, cancellationToken));
+        }
+        await Task.WhenAll(sends);
+        try
+        { OnBroadcastForTest?.Invoke(topic, envelope); }
+        catch { /* test observer must not alter publication */ }
+    }
+
+    /// <summary>
     /// Force-close every connected phone-session WebSocket whose session id
     /// matches one in <paramref name="sessionIds"/>. The socket transitions
     /// to <see cref="WebSocketState.CloseSent"/> which unblocks the receive
@@ -558,6 +577,38 @@ public sealed class MultiplexHub
                     try
                     { _writeLock.Release(); }
                     catch (ObjectDisposedException) { /* disposed while the send was in flight */ }
+                }
+            }
+        }
+
+        public async Task SendAsync(ReadOnlyMemory<byte> payload, WebSocketMessageType type, CancellationToken cancellationToken)
+        {
+            if (_socket.State != WebSocketState.Open) return;
+            using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _disposeCts.Token);
+            var acquired = false;
+            try
+            {
+                await _writeLock.WaitAsync(lifetime.Token).ConfigureAwait(false);
+                acquired = true;
+                if (_socket.State != WebSocketState.Open) return;
+                await _socket.SendAsync(payload, type, endOfMessage: true, lifetime.Token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // A canceled send may have transmitted part of a frame. Retire that
+                // socket, but never abort a different send that owns the write lock.
+                if (acquired)
+                {
+                    try { _socket.Abort(); } catch { /* already closed */ }
+                }
+            }
+            catch { /* dead/disposed peer must not delay healthy peers */ }
+            finally
+            {
+                if (acquired)
+                {
+                    try { _writeLock.Release(); }
+                    catch (ObjectDisposedException) { /* receive-loop cleanup won */ }
                 }
             }
         }

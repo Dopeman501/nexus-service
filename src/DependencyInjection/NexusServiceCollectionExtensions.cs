@@ -2718,6 +2718,7 @@ public static class NexusServiceCollectionExtensions
             sp.GetService<Nexus.Service.Lighting.SessionLockListener>()));
         services.AddHostedService(sp => sp.GetRequiredService<Nexus.Service.Sentry.SentryCoordinator>());
         services.AddSingleton<Nexus.Service.Panel.PanelDeviceRegistry>();
+        services.AddSingleton<Nexus.Service.Panel.PanelAudioTriggerPreviewStore>();
         services.AddSingleton<Nexus.Service.Panel.PanelAutoPromotion>();
         services.AddSingleton<Nexus.Service.Panel.OverlayMonitorMap>();
         services.AddSingleton(sp => new Nexus.Service.Panel.DesktopWidgetsMigration(

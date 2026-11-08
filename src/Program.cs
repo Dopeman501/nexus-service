@@ -748,6 +748,7 @@ app.MapTransferEndpoints();
 app.MapProfileEndpoints();
 app.MapDashboardPresetEndpoints();
 app.MapPanelEndpoints();
+app.MapPanelAudioTriggerPreviewEndpoints();
 app.MapD215BrightnessEndpoints();
 app.MapSentryEndpoints();
 app.MapPanelDeckEndpoints();
