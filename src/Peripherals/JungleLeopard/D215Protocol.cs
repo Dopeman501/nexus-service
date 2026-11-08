@@ -10,6 +10,7 @@ internal static class D215Protocol
     internal const byte InfoCommand = 0x06;
     internal const byte BrightnessCommand = 0x03;
     internal const byte LiveModeCommand = 0x11;
+    internal const byte RestartCommand = 0x01;
     private const int ControlHeaderBytes = 5;
     private const int ChecksumBytes = sizeof(ushort);
     internal const int ControlPrefixBytes = ControlHeaderBytes - 1;
@@ -25,6 +26,8 @@ internal static class D215Protocol
     internal static byte[] BuildInfoRequest() => BuildControlRequest(InfoCommand, []);
 
     internal static byte[] BuildLiveModeRequest() => BuildControlRequest(LiveModeCommand, []);
+
+    internal static byte[] BuildRestartRequest() => BuildControlRequest(RestartCommand, []);
 
     internal static byte[] BuildBrightnessRequest(int brightness)
     {

@@ -9,7 +9,7 @@ using Nexus.Service.Platform;
 namespace Nexus.Service.Peripherals.JungleLeopard;
 
 /// <summary>Single owner of the D215 port lease. Discovery and UI never open the port.</summary>
-internal sealed class D215ConnectionWorker(
+internal sealed partial class D215ConnectionWorker(
     ID215PortDiscovery discovery,
     DeviceControlGate gate,
     Func<D215Port, CancellationToken, ValueTask<ID215SerialTransport>> open,
@@ -65,6 +65,7 @@ internal sealed class D215ConnectionWorker(
         finally
         {
             gate.Changed -= OnGateChanged;
+            Interlocked.Exchange(ref _restart, null)?.CompleteRestartResult();
             BeginRelease(clearIfPresent: _port is not null);
             if (_retirement is { } retirement)
             {
@@ -105,6 +106,11 @@ internal sealed class D215ConnectionWorker(
 
         int gateVersion = Volatile.Read(ref _gateVersion);
         bool enabled = gate.IsEnabled(HandlerId);
+        if (Volatile.Read(ref _restart) is { } restart)
+        {
+            await ReconcileRestartAsync(candidate, ambiguous, enabled, gateVersion, restart, stoppingToken).ConfigureAwait(false);
+            return;
+        }
         if (candidate != _port || gateVersion != _observedGateVersion || !enabled)
         {
             BeginRelease(clearIfPresent: candidate is not null && candidate == _port);
@@ -169,6 +175,7 @@ internal sealed class D215ConnectionWorker(
                     return;
                 }
                 Publish(D215ConnectionStatus.Identified);
+                _lastVerified = (_session.Port.Identity, _session.Info);
                 ServiceLog.Info($"[{HandlerId}] generation {_generation} identified");
             }
             catch (OperationCanceledException) when (!ClaimAllowed(stoppingToken)) { }
@@ -225,6 +232,8 @@ internal sealed class D215ConnectionWorker(
         var pending = _attempt;
         var session = _session;
         if (pending is null && session is null) return;
+        if (session?.ConfirmedInfo is { } confirmed) _lastVerified = (session.Port.Identity, confirmed);
+        else if (session is not null) _lastVerified = null;
         var startedAt = clock.GetTimestamp();
         // Signal a graceful clear or abort before revoking the pump's active session.
         var task = RetireLeaseAsync(pending, session, clearIfPresent, _generation);

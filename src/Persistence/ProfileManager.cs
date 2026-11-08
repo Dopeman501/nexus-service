@@ -872,6 +872,14 @@ public sealed partial class ProfileManager : IDisposable
         {
             return;
         }
+        lighting.AudioTrigger = Nexus.Service.Lighting.LightingAudioTriggerPolicy.Clone(lighting.AudioTrigger);
+        foreach (var preset in lighting.LayoutPresets ?? [])
+        {
+            if (preset?.Look is { } look)
+            {
+                look.AudioTrigger = Nexus.Service.Lighting.LightingAudioTriggerPolicy.Clone(look.AudioTrigger);
+            }
+        }
         if (lighting.Animate is { } animate)
         {
             foreach (var (effect, state) in animate.States)

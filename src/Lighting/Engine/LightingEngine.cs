@@ -102,6 +102,7 @@ public sealed partial class LightingEngine : IDisposable
     // LED mapper's highlight and test pattern and a blackout hold. Memory only.
     private volatile IEffect? _studioOverlay;
     private CanvasBuffer? _studioCanvas;
+    internal Nexus.Service.Lighting.LightingAudioTriggerController? AudioTrigger { get; set; }
 
     /// <summary>True while a studio overlay is set.</summary>
     public bool StudioOverlayActive => _studioOverlay is not null;
@@ -755,6 +756,7 @@ public sealed partial class LightingEngine : IDisposable
         {
             var old = _currentEffect;
             _currentEffect = null;
+            AudioTrigger?.SetRunning(false);
             _paused = false;
             _frozen = false;
             ReleaseBlackoutState();
@@ -814,6 +816,11 @@ public sealed partial class LightingEngine : IDisposable
 
                 try
                 {
+                    if (AudioTrigger?.Tick(!_blackout && _studioOverlay is null,
+                        Environment.TickCount64, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) == true)
+                    {
+                        _resampleOnce = true;
+                    }
                     // Paused holds the last rendered canvas/device buffers untouched
                     // and still broadcasts them every tick, so hardware and preview
                     // keep receiving frames without the effect clock advancing.
@@ -898,11 +905,16 @@ public sealed partial class LightingEngine : IDisposable
                         }
                         aheadDevices = devices;
                     }
-                    else if ((_studioOverlay is not null || _resampleOnce || AnyAssignPollable()) && wakeMs <= 0)
+                    else if ((_studioOverlay is not null || AudioTrigger?.Canvas is not null || _resampleOnce || AnyAssignPollable()) && wakeMs <= 0)
                     {
                         // Paused: the effect holds, the studio overlay keeps animating over it, and once it clears the effect's paused frame is repainted onto the devices.
                         var devices = _devices;
-                        if (_studioOverlay is not null)
+                        if (AudioTrigger?.Canvas is not null)
+                        {
+                            SampleDevicesFromCanvas(devices);
+                            ApplyLedColorLocks(devices);
+                        }
+                        else if (_studioOverlay is not null)
                         {
                             ApplyTestOverlays(devices);
                         }
@@ -975,6 +987,7 @@ public sealed partial class LightingEngine : IDisposable
         }
         finally
         {
+            AudioTrigger?.ReleaseEffects();
             DisposePinRenders();
             DisposeAssignState();
             _canvas.Clear();
@@ -1228,7 +1241,7 @@ public sealed partial class LightingEngine : IDisposable
     public bool CanRenderAhead(IReadOnlyList<string> deviceIds)
     {
         var current = _currentEffect;
-        if (current is null || _studioOverlay is not null || _paused || _frozen || _blackout || _wakeDurationMs > 0)
+        if (current is null || _studioOverlay is not null || AudioTrigger?.CaptureWanted == true || _paused || _frozen || _blackout || _wakeDurationMs > 0)
         {
             return false;
         }
@@ -1541,7 +1554,7 @@ public sealed partial class LightingEngine : IDisposable
     private readonly List<Dictionary<string, CanvasBuffer?>> _aheadBatchPinned = new();
 
     private bool AheadAbandoned(AheadRequest req, IEffect effect) =>
-        req.Abandoned || _studioOverlay is not null || req.PinSig != PinAheadSig(req.DeviceIds)
+        req.Abandoned || _studioOverlay is not null || AudioTrigger?.CaptureWanted == true || req.PinSig != PinAheadSig(req.DeviceIds)
         || (Pins?.Version ?? -1) != _pinAheadSeenVersion
         || (req.NeedsGlobal && (!ReferenceEquals(req.Effect, effect) || req.ParamsSig != _aheadParamsSig || !IsTimePure(effect)));
 
@@ -1802,15 +1815,17 @@ public sealed partial class LightingEngine : IDisposable
         DeviceFrame[] devices, bool honorPins = true,
         Dictionary<string, CanvasBuffer?>? pinned = null)
     {
-        var baseCanvas = _sampleCanvas;
+        var originalCanvas = _sampleCanvas;
+        var trigger = AudioTrigger?.Canvas;
+        var baseCanvas = trigger ?? originalCanvas;
         try
         {
             var pinMap = pinned ?? _pinnedDevices;
-            SampleDevicesCore(devices, baseCanvas, honorPins && pinMap.Count > 0, pinMap);
+            SampleDevicesCore(devices, baseCanvas, trigger is null && honorPins && pinMap.Count > 0, pinMap);
         }
         finally
         {
-            _sampleCanvas = baseCanvas;
+            _sampleCanvas = originalCanvas;
         }
     }
 
@@ -1869,7 +1884,7 @@ public sealed partial class LightingEngine : IDisposable
             // unturned rect and turns with the whole frame.
             // A device on its own pin canvas follows that source alone: the
             // global sweep flag describes the main canvas, not this one.
-            var fullFrame = !onPinCanvas && FullFrameSampling;
+            var fullFrame = !onPinCanvas && AudioTrigger?.Canvas is null && FullFrameSampling;
             // A full-frame device's cell is a slice of the whole canvas, so it
             // takes the plain cell mean instead of the spot. See SampleLedBox.
             var rectX = fullFrame ? 0f : dev.X;
@@ -2216,6 +2231,7 @@ public sealed partial class LightingEngine : IDisposable
 
             // Identify and test overlays outrank a pin; a pin outranks the global source.
             if (Pins is not null
+                && AudioTrigger?.Canvas is null
                 && dev.TestPattern is null
                 && Pins.TryGet(dev.Id, out var assignment)
                 && assignment.Kind == Nexus.Service.Persistence.DevicePinKinds.Static)
@@ -2355,7 +2371,8 @@ public sealed partial class LightingEngine : IDisposable
     private void SerializeAndBroadcast()
     {
         var devices = _devices;
-        var canvasBytes = _canvas.ByteCount;
+        var canvas = AudioTrigger?.Canvas ?? _canvas;
+        var canvasBytes = canvas.ByteCount;
         var totalSize = 1 + 4 + canvasBytes + 1;
         foreach (var dev in devices)
         {
@@ -2376,7 +2393,7 @@ public sealed partial class LightingEngine : IDisposable
         buf[pos++] = (byte)(cw >> 8);
         buf[pos++] = (byte)(ch & 0xFF);
         buf[pos++] = (byte)(ch >> 8);
-        _canvas.Pixels.CopyTo(buf.AsSpan(pos));
+        canvas.Pixels.CopyTo(buf.AsSpan(pos));
         pos += canvasBytes;
         buf[pos++] = (byte)Math.Min(devices.Length, 255);
         foreach (var dev in devices)

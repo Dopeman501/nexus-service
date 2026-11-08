@@ -35,6 +35,7 @@ public static class LightingPresetLooks
             StaticSlot = SelectedSlot(templates, still),
             GlobalBrightness = lighting.GlobalBrightness,
             MusicReactive = lighting.MusicReactive,
+            AudioTrigger = LightingAudioTriggerPolicy.Clone(lighting.AudioTrigger) ?? new(),
             LastMediaId = lighting.LastMediaId ?? "",
             ScreenEffect = ClonePostProcess(lighting.ScreenEffect),
             MediaEffect = ClonePostProcess(lighting.MediaEffect),
@@ -71,6 +72,10 @@ public static class LightingPresetLooks
         if (look.MusicReactive is { } reactive)
         {
             lighting.MusicReactive = reactive;
+        }
+        if (look.AudioTrigger is not null)
+        {
+            lighting.AudioTrigger = LightingAudioTriggerPolicy.Clone(look.AudioTrigger);
         }
         if (!string.IsNullOrEmpty(look.AnimateEffect))
         {

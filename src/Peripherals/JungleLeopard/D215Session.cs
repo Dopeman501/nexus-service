@@ -33,6 +33,19 @@ internal sealed class D215Session : IAsyncDisposable
     internal D215Port Port { get; }
     internal D215DeviceInfo Info { get; }
     internal int? ConfirmedBrightness => Volatile.Read(ref _confirmedInfo)?.Brightness;
+    internal D215DeviceInfo? ConfirmedInfo => Volatile.Read(ref _confirmedInfo);
+
+    internal bool HasRunningStream
+    {
+        get
+        {
+            lock (_disposeLock)
+            {
+                return _disposeTask is null && _live is { Started.IsCompletedSuccessfully: true,
+                    Completion.IsCompleted: false, StopRequested: false, Failure: null, IsLive: true };
+            }
+        }
+    }
 
     internal bool CanStream
     {
@@ -62,9 +75,21 @@ internal sealed class D215Session : IAsyncDisposable
         }
     }
 
-    internal static async ValueTask<D215Session> ConnectAsync(D215Port port, ID215PortDiscovery discovery,
+    internal static ValueTask<D215Session> ConnectAsync(D215Port port, ID215PortDiscovery discovery,
         Func<D215Port, CancellationToken, ValueTask<ID215SerialTransport>> open, TimeProvider clock,
-        D215Timing timing, CancellationToken cancellationToken)
+        D215Timing timing, CancellationToken cancellationToken) =>
+        OpenAsync(port, discovery, open, clock, timing, null, cancellationToken);
+
+    // Only the connection worker may reuse an in-memory verification of this
+    // exact USB identity to recover firmware that stopped replying to info.
+    internal static ValueTask<D215Session> OpenForRestartAsync(D215Port port, ID215PortDiscovery discovery,
+        Func<D215Port, CancellationToken, ValueTask<ID215SerialTransport>> open, TimeProvider clock,
+        D215Timing timing, D215DeviceInfo? previouslyVerified, CancellationToken cancellationToken) =>
+        OpenAsync(port, discovery, open, clock, timing, previouslyVerified, cancellationToken);
+
+    private static async ValueTask<D215Session> OpenAsync(D215Port port, ID215PortDiscovery discovery,
+        Func<D215Port, CancellationToken, ValueTask<ID215SerialTransport>> open, TimeProvider clock,
+        D215Timing timing, D215DeviceInfo? previouslyVerified, CancellationToken cancellationToken)
     {
         ID215SerialTransport? transport = null;
         try
@@ -92,7 +117,14 @@ internal sealed class D215Session : IAsyncDisposable
             var wire = new D215Wire(transport, clock, timing);
             await Task.Delay(timing.PortSettle, clock, cancellationToken).ConfigureAwait(false);
             await wire.ClearAsync(cancellationToken).ConfigureAwait(false);
-            var info = await wire.ReadInfoAsync(cancellationToken).ConfigureAwait(false);
+            D215DeviceInfo info;
+            try { info = await wire.ReadInfoAsync(cancellationToken).ConfigureAwait(false); }
+            catch (D215ConnectionException ex) when (ex.Status == D215ConnectionStatus.NoResponse && previouslyVerified is not null)
+            {
+                info = previouslyVerified;
+            }
+            if (!info.IsSupported)
+                throw new D215ConnectionException(D215ConnectionStatus.Unsupported, "The prior D215 verification is unsupported.");
             cancellationToken.ThrowIfCancellationRequested();
             return new D215Session(port, info, transport, wire, clock, timing);
         }
@@ -133,6 +165,20 @@ internal sealed class D215Session : IAsyncDisposable
         return live is not null
             ? live.SetBrightnessAsync(value, isAuthorized, cancellationToken)
             : ValueTask.FromResult(new D215BrightnessResponse("unavailable", null));
+    }
+
+    internal async ValueTask RestartAsync(Func<bool> isAuthorized, Action attempted, CancellationToken cancellationToken)
+    {
+        lock (_disposeLock)
+        {
+            if (_disposeTask is not null || _live is not null)
+                throw new InvalidOperationException("Restart requires the worker's exclusive idle session.");
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!isAuthorized()) throw new OperationCanceledException(cancellationToken);
+        // Mark before the driver call: a partial/timed-out write is ambiguous.
+        attempted();
+        await _wire.RestartAsync(cancellationToken).ConfigureAwait(false);
     }
 
     internal void RequestStreamStop()

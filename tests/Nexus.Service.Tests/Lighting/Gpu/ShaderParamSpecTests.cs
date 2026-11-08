@@ -14,6 +14,43 @@ namespace Nexus.Service.Tests.Lighting.Gpu;
 /// </summary>
 public class ShaderParamSpecTests
 {
+    [Theory]
+    [InlineData("plasma")]
+    [InlineData("galaxy")]
+    [InlineData("mandelbrot")]
+    [InlineData("spectrumbars")]
+    [InlineData("scope")]
+    public void Background_zoom_is_positive_with_a_neutral_legacy_default(string effect)
+    {
+        var spec = ShaderLibrary.Params(effect)["u_background_zoom"];
+        Assert.Equal(0.1f, spec.Min);
+        Assert.Equal(3f, spec.Max);
+        Assert.Equal(0.05f, spec.Step);
+        Assert.Equal(1f, spec.Default);
+        Assert.True(spec.Declared);
+        Assert.Equal(1f, ShaderParamSpec.Clamp(spec, float.NaN));
+        Assert.Equal(0.1f, ShaderParamSpec.Clamp(spec, 0f));
+        Assert.Equal(3f, ShaderParamSpec.Clamp(spec, 900f));
+    }
+
+    [Theory]
+    [InlineData("plasma")]
+    [InlineData("galaxy")]
+    [InlineData("mandelbrot")]
+    [InlineData("spectrumbars")]
+    [InlineData("scope")]
+    public void Background_rotation_is_optional_degrees_with_a_legacy_zero_default(string effect)
+    {
+        var spec = ShaderLibrary.Params(effect)["u_background_rotation"];
+        Assert.Equal(0f, spec.Min);
+        Assert.Equal(360f, spec.Max);
+        Assert.Equal(1f, spec.Step);
+        Assert.Equal(0f, spec.Default);
+        Assert.True(spec.Declared);
+        Assert.Equal(0f, ShaderParamSpec.Clamp(spec, float.NaN));
+        Assert.Equal(360f, ShaderParamSpec.Clamp(spec, 900f));
+    }
+
     [Fact]
     public void Parse_DeclarationLine_CapturesRangeStepAndDefault()
     {

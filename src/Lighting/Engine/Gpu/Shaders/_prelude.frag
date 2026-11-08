@@ -15,6 +15,8 @@ uniform float u_hue;        // hint_range(0.0, 1.0, 0.01) = 0.0
 uniform float u_colorize;   // hint_range(0.0, 1.0, 0.01) = 0.0
 uniform float u_saturation; // hint_range(0.0, 4.0, 0.01) = 1.0
 uniform float u_contrast;   // hint_range(0.0, 4.0, 0.01) = 1.0
+uniform float u_background_rotation; // hint_range(0.0, 360.0, 1.0) = 0.0
+uniform float u_background_zoom; // hint_range(0.1, 3.0, 0.05) = 1.0
 
 // Audio-reactivity uniforms
 // Populated by BeatsProvider when Music Reactive is enabled; all zero
@@ -51,6 +53,20 @@ float audioPresence() {
 vec2 uv01() {
     vec2 u = gl_FragCoord.xy / u_resolution;
     u.y = 1.0 - u.y;
+    // Inverse sampling gives a clockwise turn on the top-left-origin canvas.
+    // Rotate in pixel space so wide/portrait backgrounds retain their shape.
+    // Preserve the exact legacy path at both ends of the full-turn slider.
+    if (u_background_rotation > 0.0 && u_background_rotation < 360.0) {
+        vec2 p = (u - 0.5) * u_resolution;
+        float a = radians(u_background_rotation);
+        float c = cos(a), s = sin(a);
+        u = vec2(c * p.x + s * p.y, -s * p.x + c * p.y) / u_resolution + 0.5;
+    }
+    // A larger zoom samples less of the field around the same centre.
+    // Unity preserves exact legacy pixels; an unset raw GL uniform is zero.
+    if (u_background_zoom > 0.0 && u_background_zoom != 1.0) {
+        u = (u - 0.5) / u_background_zoom + 0.5;
+    }
     return u;
 }
 vec2 uvCentered() {

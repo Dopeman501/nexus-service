@@ -872,6 +872,8 @@ public sealed class LightingSettings
     /// <summary>When true, BeatsProvider runs audio capture + spectrum analysis and
     /// publishes to AudioState so shaders react via the u_audio* uniforms.</summary>
     public bool MusicReactive { get; set; } = InstallDefaults.Lighting.MusicReactive;
+    /// <summary>Independent audio-driven lighting overlay. Missing on older profiles means disabled.</summary>
+    public Nexus.Service.Models.Lighting.LightingAudioTriggerSettings? AudioTrigger { get; set; }
     /// <summary>Render endpoint the Windows loopback captures; empty follows the
     /// system default. An unplugged pick falls back to the default until it returns.</summary>
     public string AudioOutputDeviceId { get; set; } = "";
@@ -1176,6 +1178,7 @@ public sealed class LightingPresetLook
     /// <summary>Music-reactive capture toggle. Null on a look captured before it
     /// was part of a preset - activate then leaves the live setting alone.</summary>
     public bool? MusicReactive { get; set; }
+    public Nexus.Service.Models.Lighting.LightingAudioTriggerSettings? AudioTrigger { get; set; }
     /// <summary>Media-mode clip. Without it two Media presets restore whichever
     /// clip was selected last, globally.</summary>
     public string LastMediaId { get; set; } = "";

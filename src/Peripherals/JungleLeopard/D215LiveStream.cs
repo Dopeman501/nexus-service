@@ -25,6 +25,7 @@ internal sealed class D215LiveStream
     private readonly Action<D215DeviceInfo?> _rememberInfo;
     private BrightnessRequest? _brightness;
     private int _stopRequested;
+    private int _liveActive;
     private Exception? _failure;
 
     internal D215LiveStream(D215Wire wire, ID215FrameSource frames, Func<bool> isAuthorized, TimeProvider clock,
@@ -38,6 +39,7 @@ internal sealed class D215LiveStream
     internal Task Completion { get; }
     internal Exception? Failure => Volatile.Read(ref _failure);
     internal bool StopRequested => Volatile.Read(ref _stopRequested) != 0;
+    internal bool IsLive => Volatile.Read(ref _liveActive) != 0;
 
     internal ValueTask<D215BrightnessResponse> SetBrightnessAsync(int value, Func<bool> isAuthorized, CancellationToken cancellationToken)
     {
@@ -97,6 +99,7 @@ internal sealed class D215LiveStream
 
             var liveRequestedAt = clock.GetTimestamp();
             await wire.EnterLiveAsync(abort).ConfigureAwait(false);
+            Volatile.Write(ref _liveActive, 1);
             var liveActive = true;
             if (!StopRequested && isAuthorized())
             {
@@ -118,6 +121,7 @@ internal sealed class D215LiveStream
         }
         finally
         {
+            Volatile.Write(ref _liveActive, 0);
             Interlocked.Exchange(ref _stopRequested, 1);
             Interlocked.Exchange(ref _brightness, null)?.Complete("unavailable", null);
             _started.TrySetCanceled();
@@ -158,6 +162,7 @@ internal sealed class D215LiveStream
                     if (StopRequested || !isAuthorized() || !brightness.IsAuthorized()) break;
                     var requestedAt = clock.GetElapsedTime(origin);
                     await wire.EnterLiveAsync(abort).ConfigureAwait(false);
+                    Volatile.Write(ref _liveActive, 1);
                     liveEntries++;
                     nextRenewal = ScheduleRenewal(requestedAt);
                     liveActive = true;
@@ -261,6 +266,7 @@ internal sealed class D215LiveStream
                 return false;
             }
 
+            Volatile.Write(ref _liveActive, 0);
             await wire.ClearAsync(abort).ConfigureAwait(false);
             var info = await wire.SetBrightnessAsync(request.Value, CanApply,
                 () => !request.Caller.IsCancellationRequested, _rememberInfo, abort).ConfigureAwait(false);

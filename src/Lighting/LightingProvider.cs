@@ -119,6 +119,7 @@ public sealed partial class LightingProvider : ILightingProvider, IDisposable
         // Any settings write can move a pinned effect's look, the pin set, or the mirrored screen.
         _store.OnChanged += RefreshPinnedLooks;
         RefreshPinnedLooks();
+        InitializeAudioTrigger();
         // A store that was unreadable at boot registers its sources late; a custom effect
         // restored meanwhile is running the rainbow stand-in until this rebuilds it.
         customEffects?.Recovered += () =>
@@ -170,15 +171,13 @@ public sealed partial class LightingProvider : ILightingProvider, IDisposable
     // not-yet-persisted Sync.
     public void ReconcileAudioCapture()
     {
-        if (_beats is null)
-        {
-            return;
-        }
         lock (_audioCaptureLock)
         {
+            _audioTrigger?.SetRunning(_engine.CurrentEffectName != "none");
+            if (_beats is null) return;
             var music = _store.Load().Lighting.MusicReactive;
             var forLeds = music && (ShaderLibrary.IsAudioEffect(_engine.CurrentEffectName) || _pinnedAudio);
-            if (forLeds || Volatile.Read(ref _audioCaptureDemand) > 0 || _studioAudio)
+            if (forLeds || Volatile.Read(ref _audioCaptureDemand) > 0 || _studioAudio || _audioTrigger?.CaptureWanted == true)
             {
                 _beats.Start();
             }
@@ -1951,6 +1950,7 @@ public sealed partial class LightingProvider : ILightingProvider, IDisposable
 
     public void Dispose()
     {
+        DisposeAudioTrigger();
         _studioTimer?.Dispose();
         _previewStreamer?.Dispose();
         _rgb?.Dispose();

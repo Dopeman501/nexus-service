@@ -16,6 +16,7 @@ internal sealed record D215Timing(TimeSpan OpenTimeout, TimeSpan PortSettle, Tim
     internal TimeSpan FrameInterval { get; init; } = TimeSpan.FromSeconds(1.0 / FramesPerSecond);
     internal TimeSpan LiveRenewInterval { get; init; } = TimeSpan.FromMilliseconds(1500);
     internal TimeSpan ReleaseTimeout { get; init; } = TimeSpan.FromSeconds(8);
+    internal TimeSpan RestartTimeout { get; init; } = TimeSpan.FromSeconds(35);
     internal TimeSpan IdentificationTimeout => OpenTimeout + PortSettle + ClearSettle + WriteTimeout * 3 + ReplyTimeout;
 
     internal D215Timing AtFrameRate(int? framesPerSecond)
@@ -56,6 +57,11 @@ internal sealed class D215Wire(ID215SerialTransport transport, TimeProvider cloc
     // Firmware 3.4 acknowledges entry and stays silent while already live.
     internal ValueTask RenewLiveAsync(CancellationToken cancellationToken) =>
         WriteAsync(D215Protocol.BuildLiveModeRequest(), cancellationToken);
+
+    // A reboot can remove USB before its acknowledgement is readable. The owner
+    // confirms re-enumeration, fresh identification and live entry instead.
+    internal ValueTask RestartAsync(CancellationToken cancellationToken) =>
+        WriteAsync(D215Protocol.BuildRestartRequest(), cancellationToken);
 
     internal async ValueTask<D215DeviceInfo> ReadInfoAsync(CancellationToken cancellationToken)
     {
