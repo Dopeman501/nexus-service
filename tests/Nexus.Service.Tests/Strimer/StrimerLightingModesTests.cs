@@ -45,14 +45,15 @@ public class StrimerLightingModesTests
     // ── Catalog ──
 
     [Fact]
-    public void Catalog_has_27_modes()
+    public void Catalog_has_28_modes()
     {
-        Assert.Equal(27, StrimerLightingModes.Catalog.Length);
+        Assert.Equal(28, StrimerLightingModes.Catalog.Length);
     }
 
     [Theory]
     [InlineData("off",           0x00)]
     [InlineData("custom",        0x01)]
+    [InlineData("static",        0x01)]
     [InlineData("breathing",     0x02)]
     [InlineData("flashing",      0x03)]
     [InlineData("rainbowMorph",  0x04)]

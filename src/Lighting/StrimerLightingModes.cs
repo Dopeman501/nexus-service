@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using Nexus.Service.Peripherals.Strimer;
 using Nexus.Service.Persistence;
 
@@ -16,6 +17,8 @@ public sealed class StrimerModeInfo
     public string[] DefaultColors { get; init; } = Array.Empty<string>();
     /// <summary>One animation runs across a whole channel, so only its first port is committed.</summary>
     public bool     Complete     { get; init; }
+    /// <summary>Speed level (0..4) the mode starts at when the user has not set one; negative falls back to the shared speed.</summary>
+    public int      DefaultSpeed { get; init; } = -1;
     public int      ColorsMin    => DefaultColors.Length;
     public int      ColorsMax    => DefaultColors.Length;
 }
@@ -40,21 +43,22 @@ public static class StrimerLightingModes
     private static readonly string[] Pair = { "#ff0000", "#0000ff" };
     private static readonly string[] Six = { "#ff0000", "#ff6900", "#ffd700", "#00ff00", "#0000ff", "#aa00ff" };
 
-    private static StrimerModeInfo M(string key, string label, byte effect, bool speed, bool dir, string[] colors, bool complete = false) =>
-        new() { Key = key, Label = label, EffectByte = effect, HasSpeed = speed, HasDirection = dir, HasBrightness = true, DefaultColors = colors, Complete = complete };
+    private static StrimerModeInfo M(string key, string label, byte effect, bool speed, bool dir, string[] colors, bool complete = false, int defaultSpeed = 4) =>
+        new() { Key = key, Label = label, EffectByte = effect, HasSpeed = speed, HasDirection = dir, HasBrightness = true, DefaultColors = colors, Complete = complete, DefaultSpeed = defaultSpeed };
 
     public static readonly StrimerModeInfo[] Catalog =
     {
         new() { Key = "custom", Label = "Custom (per-LED effects)", EffectByte = 0x01, HasBrightness = true },
         new() { Key = "off",    Label = "Off",                      EffectByte = 0x00 },
+        M("static",        "Static",        0x01, false, false, Single),
         M("breathing",     "Breathing",     0x02, true, false, Single),
-        M("flashing",      "Flashing",      0x03, true, false, Single),
+        M("flashing",      "Flashing",      0x03, true, false, Single, defaultSpeed: -1),
         M("rainbowMorph",  "Rainbow Morph", 0x04, true, false, None),
         M("rainbow",       "Rainbow",       0x05, true, true,  None),
-        M("spectrumCycle", "Spectrum Cycle",0x06, true, false, None),
+        M("spectrumCycle", "Spectrum Cycle",0x06, true, false, None, defaultSpeed: -1),
         M("wave",          "Wave",          0x18, true, true,  Six),
         M("snooker",       "Snooker",       0x19, true, false, Six),
-        M("mixing",        "Mixing",        0x1A, true, false, Pair),
+        M("mixing",        "Mixing",        0x1A, true, false, Pair, defaultSpeed: 2),
         M("pingPong",      "Ping Pong",     0x1B, true, false, Six),
         M("runway",        "Runway",        0x1C, true, false, Pair),
         M("painting",      "Painting",      0x1D, true, false, Six),
@@ -87,14 +91,14 @@ public static class StrimerLightingModes
     /// The palette a mode shows and plays: this mode's saved colors, else the legacy shared list,
     /// each slot falling back to the mode's default when absent or not a valid color.
     /// </summary>
-    public static string[] ResolveColors(StrimerLightingSettings ls, StrimerModeInfo mode)
+    public static string[] ResolveColors(StrimerLightingSettings ls, StrimerModeInfo mode) =>
+        ResolveColors(ls.ModeColors, ls.Colors, mode);
+
+    public static string[] ResolveColors(IReadOnlyDictionary<string, List<string>> perMode, IReadOnlyList<string> legacy, StrimerModeInfo mode)
     {
         var defaults = mode.DefaultColors;
         var result = new string[defaults.Length];
-        if (!ls.ModeColors.TryGetValue(mode.Key, out var saved) || saved.Count == 0)
-        {
-            saved = ls.Colors;
-        }
+        IReadOnlyList<string> saved = perMode.TryGetValue(mode.Key, out var own) && own.Count > 0 ? own : legacy;
         for (var i = 0; i < result.Length; i++)
         {
             result[i] = i < saved.Count && TryParseHex(saved[i], out _) ? saved[i] : defaults[i];
@@ -102,30 +106,34 @@ public static class StrimerLightingModes
         return result;
     }
 
+    /// <summary>Saved speed level of the mode, else its own default, else the shared speed.</summary>
+    public static int ResolveSpeed(IReadOnlyDictionary<string, int> perMode, int shared, StrimerModeInfo mode)
+    {
+        if (perMode.TryGetValue(mode.Key, out var saved)) return Math.Clamp(saved, 0, 4);
+        return mode.DefaultSpeed >= 0 ? mode.DefaultSpeed : Math.Clamp(shared, 0, 4);
+    }
+
     /// <summary>
     /// Flat R,G,B bytes of the color report sent with the mode, empty when the mode takes none.
     /// A single color fills the whole strip, and a mode with no slots gets the default six.
+    /// Static scales its color by the brightness level.
     /// </summary>
-    public static byte[] FirmwareColors(StrimerLightingSettings ls, StrimerModeInfo mode)
+    public static byte[] FirmwareColors(StrimerModeInfo mode, IReadOnlyList<string> palette, int brightness)
     {
         if (mode.Key is "off" or "custom") return Array.Empty<byte>();
-        var palette = mode.DefaultColors.Length == 0 ? Six : ResolveColors(ls, mode);
-        var count = palette.Length == 1 ? StrimerProtocol.MaxLedsPerZone : palette.Length;
+        if (mode.DefaultColors.Length == 0) palette = Six;
+        var count = palette.Count == 1 ? StrimerProtocol.MaxLedsPerZone : palette.Count;
+        var scale = mode.Key == "static" ? Math.Clamp(brightness, 0, 4) * 25 / 100.0 : 1.0;
         var bytes = new byte[count * 3];
         for (var i = 0; i < count; i++)
         {
-            TryParseHex(palette[palette.Length == 1 ? 0 : i], out var rgb);
-            bytes[i * 3]     = (byte)(rgb >> 16);
-            bytes[i * 3 + 1] = (byte)(rgb >> 8);
-            bytes[i * 3 + 2] = (byte)rgb;
+            TryParseHex(palette[palette.Count == 1 ? 0 : i], out var rgb);
+            bytes[i * 3]     = (byte)Math.Floor(((rgb >> 16) & 0xFF) * scale);
+            bytes[i * 3 + 1] = (byte)Math.Floor(((rgb >> 8) & 0xFF) * scale);
+            bytes[i * 3 + 2] = (byte)Math.Floor((rgb & 0xFF) * scale);
         }
         return bytes;
     }
-
-    /// <summary>Zones that receive the effect: the first port of each channel for a channel-wide animation, every port otherwise.</summary>
-    public static int[] FirmwareZones(StrimerModeInfo mode) => mode.Complete
-        ? new[] { 0, StrimerProtocol.AtxZoneCount }
-        : new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11 };
 
     private static bool TryParseHex(string? text, out int rgb)
     {
