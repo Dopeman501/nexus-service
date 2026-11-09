@@ -9,14 +9,32 @@ namespace Nexus.Service.Lighting;
 /// </summary>
 public static class StrimerEffectsMigration
 {
+    /// <summary>True when the stored document has a Strimer settings block at all.</summary>
+    public static bool HasSettings(string json)
+    {
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+            foreach (var devices in doc.RootElement.EnumerateObject())
+            {
+                if (!devices.NameEquals("devices") && !string.Equals(devices.Name, "devices", System.StringComparison.OrdinalIgnoreCase)) continue;
+                if (devices.Value.ValueKind != System.Text.Json.JsonValueKind.Object) return false;
+                foreach (var block in devices.Value.EnumerateObject())
+                {
+                    if (string.Equals(block.Name, "strimerLighting", System.StringComparison.OrdinalIgnoreCase)) return true;
+                }
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+        }
+        return false;
+    }
+
     public static void Apply(NexusSettings doc)
     {
         if (doc.Devices?.StrimerLighting is not { } ls || ls.ModeSpeeds.Count > 0 || ls.ModeColors.Count > 0)
-        {
-            return;
-        }
-        // A document that never set anything keeps starting each effect at its own default.
-        if (ls is { Mode: "rainbow", EffectMode: null, Speed: 2, Colors.Count: 0 })
         {
             return;
         }

@@ -413,6 +413,8 @@ public class PanelRotationMigrationEquivalenceTests : IDisposable
     {
         var copy = JsonSerializer.Deserialize(JsonSerializer.Serialize(s, PersistenceJsonContext.Default.NexusSettings), PersistenceJsonContext.Default.NexusSettings)!;
         copy.PanelDevices.Clear();
+        // The v33 Strimer pass seeds the shown effect's speed, which is not a panel concern.
+        copy.Devices.StrimerLighting.ModeSpeeds.Clear();
         copy.SchemaVersion = 0;
         return JsonSerializer.Serialize(copy, PersistenceJsonContext.Default.NexusSettings);
     }

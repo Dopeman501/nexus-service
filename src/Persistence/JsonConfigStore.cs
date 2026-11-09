@@ -149,9 +149,15 @@ public sealed class JsonConfigStore : IConfigStore, IDisposable
         {
             var preUsbMonitor = _cached.SchemaVersion < Nexus.Service.Panel.UsbMonitorPanelMigration.SchemaVersion;
             // Read before the fold: the rotation takes a stored legacy flag into account too.
+            // The Strimer pass needs the raw file: a block that was never written is not the same as a default one.
+            var movesStrimer = _cached.SchemaVersion < 33 && Nexus.Service.Lighting.StrimerEffectsMigration.HasSettings(json);
             var movesLayout = _cached.SchemaVersion < Nexus.Service.Panel.PanelLayoutSlotsMigration.SchemaVersion
                 && Nexus.Service.Panel.PanelLayoutSlotsMigration.WouldMove(_cached);
             Migrate(_cached);
+            if (movesStrimer)
+            {
+                Nexus.Service.Lighting.StrimerEffectsMigration.Apply(_cached);
+            }
             Nexus.Service.Conflicts.ConflictWhitelistMigration.ReconcileBetaLock(_cached);
             if (preUsbMonitor && _cached.UsbMonitorPanelPairs is not null)
             {
@@ -468,10 +474,6 @@ public sealed class JsonConfigStore : IConfigStore, IDisposable
         {
             Nexus.Service.Panel.PanelLayoutSlotsMigration.ClampRectangular(doc);
             Nexus.Service.Panel.PanelLayoutSlotsMigration.Apply(doc);
-        }
-        if (doc.SchemaVersion < 33)
-        {
-            Nexus.Service.Lighting.StrimerEffectsMigration.Apply(doc);
         }
         doc.SchemaVersion = NexusSettings.CurrentSchemaVersion;
     }

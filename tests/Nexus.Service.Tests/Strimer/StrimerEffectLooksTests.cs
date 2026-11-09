@@ -65,7 +65,11 @@ public class StrimerEffectLooksTests
         try
         {
             var path = System.IO.Path.Combine(dir, "settings.json");
-            System.IO.File.WriteAllText(path, "{\"schemaVersion\":32,\"devices\":{\"strimerLighting\":" + strimerJson + "}}");
+            System.IO.File.WriteAllText(
+                path,
+                strimerJson == ""
+                    ? "{\"schemaVersion\":32,\"devices\":{}}"
+                    : "{\"schemaVersion\":32,\"devices\":{\"strimerLighting\":" + strimerJson + "}}");
             var store = new JsonConfigStore(path);
             try
             {
@@ -107,6 +111,23 @@ public class StrimerEffectLooksTests
         var plan = StrimerEffectLooks.BuildPlan(ls, new MasterLevel(1f, false));
         Assert.Equal(newLevel, ls.ModeSpeeds["wave"]);
         Assert.Equal(oldBytes[oldLevel], plan[0].Speed);
+    }
+
+    [Fact]
+    public void An_untouched_saved_block_still_keeps_its_effect_at_the_speed_it_showed()
+    {
+        var ls = Migrated("{\"mode\":\"rainbow\",\"speed\":2}", out _);
+        Assert.Equal(2, ls.ModeSpeeds["rainbow"]);
+        Assert.Equal(0x00, StrimerEffectLooks.BuildPlan(ls, new MasterLevel(1f, false))[0].Speed);
+        Assert.Equal(4, StrimerEffectLooks.Shared(new StrimerLightingSettings { Mode = "wave" }).Speed);
+    }
+
+    [Fact]
+    public void A_document_with_no_Strimer_block_is_left_without_saved_speeds()
+    {
+        var ls = Migrated("", out _);
+        Assert.Empty(ls.ModeSpeeds);
+        Assert.Empty(ls.ModeColors);
     }
 
     [Fact]
