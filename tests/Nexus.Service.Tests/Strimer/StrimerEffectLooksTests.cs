@@ -1,6 +1,8 @@
 using System.Collections.Generic;
 using Nexus.Service.Lighting;
+using Nexus.Service.Peripherals.Strimer;
 using Nexus.Service.Persistence;
+using Nexus.Service.Routes;
 
 namespace Nexus.Service.Tests.Strimer;
 
@@ -56,16 +58,122 @@ public class StrimerEffectLooksTests
         Assert.Equal(6, look.Colors.Length);
     }
 
+    private static StrimerLightingSettings Migrated(string strimerJson, out NexusSettings settings)
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "nexus-strimer-mig-" + System.Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            var path = System.IO.Path.Combine(dir, "settings.json");
+            System.IO.File.WriteAllText(path, "{\"schemaVersion\":32,\"devices\":{\"strimerLighting\":" + strimerJson + "}}");
+            var store = new JsonConfigStore(path);
+            try
+            {
+                settings = store.Load();
+                return settings.Devices.StrimerLighting;
+            }
+            finally
+            {
+                store.Dispose();
+            }
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
     [Fact]
     public void Settings_saved_before_per_cable_effects_load_as_every_port_using_the_saved_effect()
     {
-        var ls = System.Text.Json.JsonSerializer.Deserialize(
-            "{\"mode\":\"breathing\",\"speed\":3,\"colors\":[\"#112233\"]}",
-            Nexus.Service.Serialization.PersistenceJsonContext.Default.StrimerLightingSettings)!;
+        var ls = Migrated("{\"mode\":\"breathing\",\"speed\":2,\"colors\":[\"#112233\"]}", out var s);
+        Assert.Equal(NexusSettings.CurrentSchemaVersion, s.SchemaVersion);
         Assert.Empty(ls.Targets);
         var plan = StrimerEffectLooks.BuildPlan(ls, new MasterLevel(1f, false));
         Assert.Equal(12, plan.Count);
         Assert.All(plan, z => Assert.Equal(0x02, z.Mode.EffectByte));
         Assert.Equal(0x11, plan[0].Colors[0]);
+        Assert.Equal(0x00, plan[0].Speed);
+    }
+
+    [Theory]
+    [InlineData(2, 2)]
+    [InlineData(3, 4)]
+    [InlineData(4, 3)]
+    public void Migration_keeps_the_speed_byte_the_effect_already_sent(int oldLevel, int newLevel)
+    {
+        var oldBytes = new byte[] { 0x02, 0x01, 0x00, 0xFE, 0xFF };
+        var ls = Migrated("{\"mode\":\"wave\",\"speed\":" + oldLevel + "}", out _);
+        var plan = StrimerEffectLooks.BuildPlan(ls, new MasterLevel(1f, false));
+        Assert.Equal(newLevel, ls.ModeSpeeds["wave"]);
+        Assert.Equal(oldBytes[oldLevel], plan[0].Speed);
+    }
+
+    [Fact]
+    public void Migration_moves_the_shared_colors_to_the_effect_they_were_set_for_and_clears_them()
+    {
+        var ls = Migrated("{\"mode\":\"mixing\",\"colors\":[\"#010203\",\"#040506\"]}", out _);
+        Assert.Empty(ls.Colors);
+        Assert.Equal(new List<string> { "#010203", "#040506" }, ls.ModeColors["mixing"]);
+        Assert.Equal("#ff0000", StrimerLightingModes.ResolveColors(ls, StrimerLightingModes.Find("wave")!)[0]);
+    }
+
+    [Fact]
+    public void The_four_strip_harness_gets_four_ports_and_the_matching_latch_mask()
+    {
+        var ls = new StrimerLightingSettings { Mode = "rainbow" };
+        var plan = StrimerEffectLooks.BuildPlan(ls, new MasterLevel(1f, false), StrimerProtocol.GpuZoneCountDual);
+        Assert.Equal(10, plan.Count);
+        Assert.Equal(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, plan.ConvertAll(z => z.Zone));
+    }
+
+    [Fact]
+    public void Switching_from_per_port_effects_to_a_channel_wide_one_rewrites_only_the_first_port_of_each_cable()
+    {
+        var hid = new StrimerFirmwareCommitTests.FakeHid();
+        var hub = new StrimerHub();
+        hub.Attach(hid);
+        var ls = new StrimerLightingSettings { Mode = "rainbow" };
+        StrimerLightingFrameWriter.CommitFirmwareMode(hub, StrimerEffectLooks.BuildPlan(ls, new MasterLevel(1f, false)));
+        hid.Writes.Clear();
+
+        ls.Mode = "drizzling";
+        StrimerLightingFrameWriter.CommitFirmwareMode(hub, StrimerEffectLooks.BuildPlan(ls, new MasterLevel(1f, false)));
+
+        Assert.Equal(new byte[] { 0x10, 0x30, 0x16, 0x36, 0x2C }, hid.Writes.ConvertAll(w => w[1]));
+        Assert.Equal(new byte[] { 0x00, 0x41 }, new[] { hid.Writes[4][2], hid.Writes[4][3] });
+    }
+
+    [Theory]
+    [InlineData("ch0", "ripple", false, null)]
+    [InlineData("p3", "ripple", false, "channel-wide")]
+    [InlineData("p3", "wave", false, null)]
+    [InlineData("p3", "ripple", true, null)]
+    [InlineData("p3", "custom", false, "Lighting page")]
+    [InlineData("ch1", "custom", false, "Lighting page")]
+    [InlineData("p10", "wave", false, "harness")]
+    [InlineData("p9", "wave", false, null)]
+    [InlineData("zz", "wave", false, "unknown target")]
+    public void Patch_validation_for_a_target(string target, string mode, bool reset, string? errorPart)
+    {
+        var request = new StrimerLightingRequest { Target = target, Mode = mode, ResetTarget = reset };
+        var error = DevicesRoutes.ValidateStrimerPatch(new StrimerLightingSettings { Mode = "rainbow" }, StrimerProtocol.GpuZoneCountDual, request);
+        if (errorPart == null) Assert.Null(error); else Assert.Contains(errorPart, error);
+    }
+
+    [Fact]
+    public void A_port_inheriting_a_channel_wide_effect_refuses_an_edit_that_names_no_per_port_effect()
+    {
+        var ls = new StrimerLightingSettings { Mode = "drizzling" };
+        Assert.NotNull(DevicesRoutes.ValidateStrimerPatch(ls, 6, new StrimerLightingRequest { Target = "p2", Speed = 1 }));
+        Assert.Null(DevicesRoutes.ValidateStrimerPatch(ls, 6, new StrimerLightingRequest { Target = "p2", Mode = "wave" }));
+    }
+
+    [Fact]
+    public void Patch_validation_rejects_a_color_that_is_not_a_hex_triplet()
+    {
+        var ls = new StrimerLightingSettings();
+        Assert.NotNull(DevicesRoutes.ValidateStrimerPatch(ls, 6, new StrimerLightingRequest { Colors = new[] { "red" } }));
+        Assert.Null(DevicesRoutes.ValidateStrimerPatch(ls, 6, new StrimerLightingRequest { Colors = new[] { "#aabbcc" } }));
     }
 }

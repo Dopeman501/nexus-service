@@ -342,6 +342,7 @@ public sealed class JsonConfigStore : IConfigStore, IDisposable
     /// v25: a stored Keeb.FirmwareLighting.Brightness equal to the old default (always persisted) moves to the new default. Profile files are covered by ProfileManager.
     /// v31: panel records' Flip180/Portrait fold into one clockwise Rotation (PanelRotationMigration).
     /// v32: the 8.8 inch strip's single layout moves to the slot of its mounted orientation (PanelLayoutSlotsMigration).
+    /// v33: the Strimer's shared speed and color list move under the effect they were set for (StrimerEffectsMigration).
     /// </summary>
     private static void Migrate(NexusSettings doc)
     {
@@ -467,6 +468,10 @@ public sealed class JsonConfigStore : IConfigStore, IDisposable
         {
             Nexus.Service.Panel.PanelLayoutSlotsMigration.ClampRectangular(doc);
             Nexus.Service.Panel.PanelLayoutSlotsMigration.Apply(doc);
+        }
+        if (doc.SchemaVersion < 33)
+        {
+            Nexus.Service.Lighting.StrimerEffectsMigration.Apply(doc);
         }
         doc.SchemaVersion = NexusSettings.CurrentSchemaVersion;
     }

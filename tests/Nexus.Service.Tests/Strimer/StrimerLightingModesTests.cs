@@ -125,18 +125,16 @@ public class StrimerLightingModesTests
     }
 
     [Fact]
-    public void ResolveColors_falls_back_per_slot_and_prefers_the_modes_own_palette()
+    public void ResolveColors_falls_back_per_slot_to_the_modes_default()
     {
         var mode = StrimerLightingModes.Find("drizzling")!;
-        var ls = new StrimerLightingSettings { Colors = { "#111111" } };
-        Assert.Equal("#111111", StrimerLightingModes.ResolveColors(ls, mode)[0]);
-        Assert.Equal("#ff6900", StrimerLightingModes.ResolveColors(ls, mode)[1]);
-
+        var ls = new StrimerLightingSettings();
         ls.ModeColors["drizzling"] = new List<string> { "#222222", "bad" };
         var resolved = StrimerLightingModes.ResolveColors(ls, mode);
         Assert.Equal(6, resolved.Length);
         Assert.Equal("#222222", resolved[0]);
         Assert.Equal("#ff6900", resolved[1]);
+        Assert.Equal("#ff0000", StrimerLightingModes.ResolveColors(ls, StrimerLightingModes.Find("wave")!)[0]);
     }
 
     [Fact]

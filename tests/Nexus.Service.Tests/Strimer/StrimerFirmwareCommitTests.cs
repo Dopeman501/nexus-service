@@ -10,7 +10,7 @@ namespace Nexus.Service.Tests.Strimer;
 
 public class StrimerFirmwareCommitTests
 {
-    private sealed class FakeHid : IHidDevice
+    internal sealed class FakeHid : IHidDevice
     {
         public List<byte[]> Writes { get; } = new();
         public int VendorId => StrimerProtocol.VendorId;

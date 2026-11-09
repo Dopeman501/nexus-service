@@ -52,7 +52,7 @@ public static class StrimerEffectLooks
             StrimerLightingModes.ResolveSpeed(t.ModeSpeeds, 0, mode),
             t.Direction,
             t.Brightness,
-            StrimerLightingModes.ResolveColors(t.ModeColors, Array.Empty<string>(), mode));
+            StrimerLightingModes.ResolveColors(t.ModeColors, mode));
     }
 
     /// <summary>What the target shows: its own effect, else the cable's, else the shared one.</summary>
@@ -77,9 +77,9 @@ public static class StrimerEffectLooks
 
     /// <summary>
     /// The zones to write. A channel-wide effect on a cable is one command on its first port;
-    /// any other effect goes to each of the cable's six ports, a port keeping its own effect if it has one.
+    /// any other effect goes to each port the cable has, a port keeping its own effect if it has one.
     /// </summary>
-    public static List<StrimerZonePlan> BuildPlan(StrimerLightingSettings ls, MasterLevel globalBrightness)
+    public static List<StrimerZonePlan> BuildPlan(StrimerLightingSettings ls, MasterLevel globalBrightness, int gpuZones = StrimerProtocol.GpuZoneCount)
     {
         var plan = new List<StrimerZonePlan>(StrimerProtocol.ZoneCount);
         for (var cable = 0; cable < 2; cable++)
@@ -91,7 +91,8 @@ public static class StrimerEffectLooks
                 plan.Add(Plan(first, cableLook, globalBrightness));
                 continue;
             }
-            for (var zone = first; zone < first + StrimerProtocol.AtxZoneCount; zone++)
+            var count = cable == 0 ? StrimerProtocol.AtxZoneCount : StrimerProtocol.NormalizeGpuZoneCount(gpuZones);
+            for (var zone = first; zone < first + count; zone++)
             {
                 var look = cableLook;
                 if (ls.Targets.TryGetValue("p" + zone, out var port))

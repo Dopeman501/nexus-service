@@ -16,50 +16,10 @@ public static partial class DevicesRoutes
         // GET /devices/strimer/lighting - current settings and mode catalog.
         app.MapGet("/devices/strimer/lighting", (IConfigStore store) =>
         {
-            var s       = store.Load();
-            var ls      = s.Devices.StrimerLighting;
-            var catalog = new StrimerModeInfoDto[StrimerLightingModes.Catalog.Length];
-            for (var i = 0; i < StrimerLightingModes.Catalog.Length; i++)
-            {
-                var m = StrimerLightingModes.Catalog[i];
-                catalog[i] = new StrimerModeInfoDto
-                {
-                    Key          = m.Key,
-                    Label        = m.Label,
-                    HasSpeed     = m.HasSpeed,
-                    HasDirection = m.HasDirection,
-                    HasBrightness= m.HasBrightness,
-                    ColorsMin    = m.ColorsMin,
-                    ColorsMax    = m.ColorsMax,
-                    DefaultColors= m.DefaultColors,
-                    Complete     = m.Complete,
-                };
-            }
-            var shared = StrimerEffectLooks.Shared(ls);
-            var looks  = new List<StrimerLookDto>(ls.Targets.Count);
-            foreach (var key in ls.Targets.Keys)
-            {
-                if (StrimerEffectLooks.NormalizeTarget(key) is not { } target) continue;
-                var look = StrimerEffectLooks.Own(ls.Targets[key]);
-                looks.Add(new StrimerLookDto
-                {
-                    Target = target, Mode = look.Mode.Key, Speed = look.Speed, Direction = look.Direction,
-                    Brightness = look.Brightness, Colors = look.Colors,
-                });
-            }
-            return Results.Json(new StrimerLightingResponse
-            {
-                Mode      = ls.Mode,
-                EffectMode= ls.Mode != "custom" ? ls.Mode : ls.EffectMode ?? "rainbow",
-                Speed     = shared.Speed,
-                Direction = ls.Direction,
-                Brightness= ls.Brightness,
-                Colors    = shared.Colors,
-                Looks     = looks.ToArray(),
-                GpuZones  = StrimerProtocol.NormalizeGpuZoneCount(s.Devices.StrimerGpuZones),
-                Modes     = catalog,
-                ArgbSync  = ls.ArgbSync,
-            }, AppJsonContext.Default.StrimerLightingResponse);
+            // Read under the store's lock: a PUT edits the target dictionary in place.
+            StrimerLightingResponse? response = null;
+            store.Read(s => response = BuildStrimerLightingResponse(s));
+            return Results.Json(response!, AppJsonContext.Default.StrimerLightingResponse);
         });
 
         // PUT /devices/strimer/lighting - patch mode/speed/direction/brightness/colors.
@@ -69,20 +29,11 @@ public static partial class DevicesRoutes
             StrimerLightingDeviceProvider lighting,
             Nexus.Service.Sockets.MultiplexHub mux) =>
         {
-            if (body.Mode != null && StrimerLightingModes.Find(body.Mode) == null)
-            {
-                return Results.BadRequest(ApiResponse.Fail("unknown mode key"));
-            }
-            string? target = null;
-            if (body.Target != null && body.Target != StrimerEffectLooks.AllTarget)
-            {
-                target = StrimerEffectLooks.NormalizeTarget(body.Target);
-                if (target == null) return Results.BadRequest(ApiResponse.Fail("unknown target"));
-                if (target[0] == 'p' && body.Mode != null && StrimerLightingModes.Find(body.Mode)!.Complete)
-                {
-                    return Results.BadRequest(ApiResponse.Fail("a channel-wide effect needs a cable target"));
-                }
-            }
+            string? error = null;
+            store.Read(s => error = ValidateStrimerPatch(
+                s.Devices.StrimerLighting, StrimerProtocol.NormalizeGpuZoneCount(s.Devices.StrimerGpuZones), body));
+            if (error != null) return Results.BadRequest(ApiResponse.Fail(error));
+            string? target = body.Target is null or StrimerEffectLooks.AllTarget ? null : StrimerEffectLooks.NormalizeTarget(body.Target);
             store.Update(s =>
             {
                 var ls = s.Devices.StrimerLighting;
@@ -127,6 +78,71 @@ public static partial class DevicesRoutes
 
 public static partial class DevicesRoutes
 {
+    internal static StrimerLightingResponse BuildStrimerLightingResponse(NexusSettings s)
+    {
+        var ls      = s.Devices.StrimerLighting;
+        var catalog = new StrimerModeInfoDto[StrimerLightingModes.Catalog.Length];
+        for (var i = 0; i < StrimerLightingModes.Catalog.Length; i++)
+        {
+            var m = StrimerLightingModes.Catalog[i];
+            catalog[i] = new StrimerModeInfoDto
+            {
+                Key          = m.Key,
+                Label        = m.Label,
+                HasSpeed     = m.HasSpeed,
+                HasDirection = m.HasDirection,
+                HasBrightness= m.HasBrightness,
+                ColorsMin    = m.ColorsMin,
+                ColorsMax    = m.ColorsMax,
+                DefaultColors= m.DefaultColors,
+                Complete     = m.Complete,
+            };
+        }
+        var shared = StrimerEffectLooks.Shared(ls);
+        var looks  = new List<StrimerLookDto>(ls.Targets.Count);
+        foreach (var (key, own) in ls.Targets)
+        {
+            if (StrimerEffectLooks.NormalizeTarget(key) is not { } target) continue;
+            var look = StrimerEffectLooks.Own(own);
+            looks.Add(new StrimerLookDto
+            {
+                Target = target, Mode = look.Mode.Key, Speed = look.Speed, Direction = look.Direction,
+                Brightness = look.Brightness, Colors = look.Colors,
+            });
+        }
+        return new StrimerLightingResponse
+        {
+            Mode      = ls.Mode,
+            EffectMode= ls.Mode != "custom" ? ls.Mode : ls.EffectMode ?? "rainbow",
+            Speed     = shared.Speed,
+            Direction = ls.Direction,
+            Brightness= ls.Brightness,
+            Colors    = shared.Colors,
+            Looks     = looks.ToArray(),
+            GpuZones  = StrimerProtocol.NormalizeGpuZoneCount(s.Devices.StrimerGpuZones),
+            Modes     = catalog,
+            ArgbSync  = ls.ArgbSync,
+        };
+    }
+
+    /// <summary>The reason a patch is refused, or null when it can be applied.</summary>
+    internal static string? ValidateStrimerPatch(StrimerLightingSettings ls, int gpuZones, StrimerLightingRequest body)
+    {
+        if (body.Mode != null && StrimerLightingModes.Find(body.Mode) == null) return "unknown mode key";
+        if (body.Colors != null && Array.Exists(body.Colors, c => !StrimerLightingModes.IsHexColor(c))) return "colors must be #rrggbb";
+        if (body.Target is null or StrimerEffectLooks.AllTarget) return null;
+
+        var target = StrimerEffectLooks.NormalizeTarget(body.Target);
+        if (target == null) return "unknown target";
+        if (body.Mode == "custom") return "a cable or port cannot play the Lighting page mode";
+        var isPort = target[0] == 'p';
+        if (isPort && int.Parse(target.AsSpan(1)) >= StrimerProtocol.AtxZoneCount + gpuZones) return "that strip is not on this harness";
+        if (body.ResetTarget == true || !isPort) return null;
+
+        var effective = StrimerLightingModes.Find(body.Mode ?? StrimerEffectLooks.Resolve(ls, target).Mode.Key)!;
+        return effective.Complete ? "a channel-wide effect runs on a cable, not a single port; pick a per-port effect" : null;
+    }
+
     // Slots the request omits keep what the mode shows now.
     private static void StoreColors(Dictionary<string, List<string>> perMode, StrimerModeInfo mode, string[] sent, string[] current)
     {

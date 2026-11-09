@@ -87,21 +87,18 @@ public static class StrimerLightingModes
         return null;
     }
 
-    /// <summary>
-    /// The palette a mode shows and plays: this mode's saved colors, else the legacy shared list,
-    /// each slot falling back to the mode's default when absent or not a valid color.
-    /// </summary>
+    /// <summary>The palette a mode shows and plays: its saved colors, each slot falling back to the mode's default when absent or not a valid color.</summary>
     public static string[] ResolveColors(StrimerLightingSettings ls, StrimerModeInfo mode) =>
-        ResolveColors(ls.ModeColors, ls.Colors, mode);
+        ResolveColors(ls.ModeColors, mode);
 
-    public static string[] ResolveColors(IReadOnlyDictionary<string, List<string>> perMode, IReadOnlyList<string> legacy, StrimerModeInfo mode)
+    public static string[] ResolveColors(IReadOnlyDictionary<string, List<string>> perMode, StrimerModeInfo mode)
     {
         var defaults = mode.DefaultColors;
         var result = new string[defaults.Length];
-        IReadOnlyList<string> saved = perMode.TryGetValue(mode.Key, out var own) && own.Count > 0 ? own : legacy;
+        var saved = perMode.TryGetValue(mode.Key, out var own) ? own : null;
         for (var i = 0; i < result.Length; i++)
         {
-            result[i] = i < saved.Count && TryParseHex(saved[i], out _) ? saved[i] : defaults[i];
+            result[i] = saved != null && i < saved.Count && IsHexColor(saved[i]) ? saved[i] : defaults[i];
         }
         return result;
     }
@@ -134,6 +131,8 @@ public static class StrimerLightingModes
         }
         return bytes;
     }
+
+    public static bool IsHexColor(string? text) => TryParseHex(text, out _);
 
     private static bool TryParseHex(string? text, out int rgb)
     {

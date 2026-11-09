@@ -142,7 +142,10 @@ public sealed class StrimerLightingFrameWriter : IHostedService, IDisposable
 
         if (StrimerLightingModes.Find(ls.Mode) == null) return;
 
-        var plan = StrimerEffectLooks.BuildPlan(ls, globalBrightness);
+        // The plan walks dictionaries a settings write edits in place, so it is built under the store's lock.
+        var gpuZones = StrimerProtocol.NormalizeGpuZoneCount(settings.Devices.StrimerGpuZones);
+        List<StrimerZonePlan> plan = new();
+        _store.Read(s => plan = StrimerEffectLooks.BuildPlan(s.Devices.StrimerLighting, globalBrightness, gpuZones));
         var sig = ComputeFirmwareSig(plan);
         if (_lastFirmwareSig.HasValue && sig == _lastFirmwareSig.Value) return;
 
