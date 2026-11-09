@@ -126,7 +126,7 @@ public class StrimerEffectLooksTests
     public void A_block_that_already_has_the_per_effect_keys_is_left_alone()
     {
         var ls = Migrated("{\"mode\":\"breathing\",\"speed\":3,\"colors\":[\"#111111\"],\"modeSpeeds\":{},\"modeColors\":{}}", out var s);
-        Assert.Equal(32, s.SchemaVersion);
+        Assert.Equal(NexusSettings.CurrentSchemaVersion, s.SchemaVersion);
         Assert.Empty(ls.ModeSpeeds);
         Assert.Equal(3, ls.Speed);
         Assert.Single(ls.Colors);
@@ -151,7 +151,7 @@ public class StrimerEffectLooksTests
                 Assert.Equal(4, ls.Speed);
                 Assert.Equal(4, ls.ModeSpeeds["wave"]);
                 Assert.Equal(new List<string> { "#010203" }, ls.ModeColors["wave"]);
-                Assert.Empty(ls.Colors);
+                Assert.Single(ls.Colors);
             }
             finally
             {
@@ -173,10 +173,10 @@ public class StrimerEffectLooksTests
     }
 
     [Fact]
-    public void Migration_moves_the_shared_colors_to_the_effect_they_were_set_for_and_clears_them()
+    public void Migration_moves_the_shared_colors_to_the_effect_they_were_set_for_and_keeps_the_old_list()
     {
         var ls = Migrated("{\"mode\":\"mixing\",\"colors\":[\"#010203\",\"#040506\"]}", out _);
-        Assert.Empty(ls.Colors);
+        Assert.Equal(2, ls.Colors.Count);
         Assert.Equal(new List<string> { "#010203", "#040506" }, ls.ModeColors["mixing"]);
         Assert.Equal("#ff0000", StrimerLightingModes.ResolveColors(ls, StrimerLightingModes.Find("wave")!)[0]);
     }
@@ -188,6 +188,28 @@ public class StrimerEffectLooksTests
         var plan = StrimerEffectLooks.BuildPlan(ls, new MasterLevel(1f, false), StrimerProtocol.GpuZoneCountDual);
         Assert.Equal(10, plan.Count);
         Assert.Equal(new[] { 0, 1, 2, 3, 4, 5, 6, 7, 8, 9 }, plan.ConvertAll(z => z.Zone));
+
+        var hid = new StrimerFirmwareCommitTests.FakeHid();
+        var hub = new StrimerHub();
+        hub.Attach(hid);
+        StrimerLightingFrameWriter.CommitFirmwareMode(hub, plan);
+        var latch = hid.Writes[^1];
+        Assert.Equal(new byte[] { 0xE0, 0x2C, 0x03, 0xFF }, new[] { latch[0], latch[1], latch[2], latch[3] });
+    }
+
+    [Fact]
+    public void Migration_follows_the_effect_the_page_shows_when_the_Lighting_page_drives_the_cable()
+    {
+        var ls = Migrated("{\"mode\":\"custom\",\"effectMode\":\"wave\",\"speed\":3,\"colors\":[\"#010203\"]}", out _);
+        Assert.Equal(4, ls.ModeSpeeds["wave"]);
+        Assert.Equal(new List<string> { "#010203" }, ls.ModeColors["wave"]);
+    }
+
+    [Fact]
+    public void Migration_falls_back_to_rainbow_with_no_remembered_effect_or_an_unknown_one()
+    {
+        Assert.Equal(4, Migrated("{\"mode\":\"custom\",\"speed\":3}", out _).ModeSpeeds["rainbow"]);
+        Assert.Equal(4, Migrated("{\"mode\":\"gone\",\"speed\":3}", out _).ModeSpeeds["rainbow"]);
     }
 
     [Fact]

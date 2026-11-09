@@ -25,8 +25,10 @@ public static class StrimerEffectsMigration
             return false;
         }
         var key = ls.Mode != "custom" ? ls.Mode : ls.EffectMode ?? "rainbow";
-        var mode = StrimerLightingModes.Find(key);
-        if (!hasSpeeds && mode != null)
+        // A stored key this build does not know plays as the effect the page falls back to, so the values follow it.
+        var mode = StrimerLightingModes.Find(key) ?? StrimerEffectLooks.Shared(new StrimerLightingSettings { Mode = key }).Mode;
+        key = mode.Key;
+        if (!hasSpeeds)
         {
             // The two fastest levels swapped bytes, so the level that sent the same byte as before is the other one.
             var level = ls.Speed switch { 3 => 4, 4 => 3, _ => ls.Speed };
@@ -38,11 +40,11 @@ public static class StrimerEffectsMigration
         }
         if (!hasColors)
         {
-            if (mode != null && mode.DefaultColors.Length > 0 && ls.Colors.Count > 0)
+            // The old list stays so a build without per-effect colors still finds its palette.
+            if (mode.DefaultColors.Length > 0 && ls.Colors.Count > 0)
             {
                 ls.ModeColors[key] = new List<string>(ls.Colors);
             }
-            ls.Colors.Clear();
         }
         return true;
     }
