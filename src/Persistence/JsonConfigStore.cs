@@ -137,6 +137,11 @@ public sealed class JsonConfigStore : IConfigStore, IDisposable
         // Pre-pin per-device locks and fan locks fold into pins before
         // anything reads the document; a no-op once migrated.
         var pinsMigrated = Nexus.Service.Lighting.PinMigration.Apply(_cached);
+        // Keyed on the file's own content rather than the schema version, so it runs once on any build.
+        if (Nexus.Service.Lighting.StrimerEffectsMigration.Apply(_cached, json))
+        {
+            pinsMigrated = true;
+        }
         // A file with no schemaVersion key deserializes to the current
         // version and would skip Migrate(), yet it is not a fresh install.
         if (!HasTopLevelSchemaVersion(json))
@@ -149,15 +154,9 @@ public sealed class JsonConfigStore : IConfigStore, IDisposable
         {
             var preUsbMonitor = _cached.SchemaVersion < Nexus.Service.Panel.UsbMonitorPanelMigration.SchemaVersion;
             // Read before the fold: the rotation takes a stored legacy flag into account too.
-            // The Strimer pass needs the raw file: a block that was never written is not the same as a default one.
-            var movesStrimer = _cached.SchemaVersion < 33 && Nexus.Service.Lighting.StrimerEffectsMigration.HasSettings(json);
             var movesLayout = _cached.SchemaVersion < Nexus.Service.Panel.PanelLayoutSlotsMigration.SchemaVersion
                 && Nexus.Service.Panel.PanelLayoutSlotsMigration.WouldMove(_cached);
             Migrate(_cached);
-            if (movesStrimer)
-            {
-                Nexus.Service.Lighting.StrimerEffectsMigration.Apply(_cached);
-            }
             Nexus.Service.Conflicts.ConflictWhitelistMigration.ReconcileBetaLock(_cached);
             if (preUsbMonitor && _cached.UsbMonitorPanelPairs is not null)
             {
@@ -348,7 +347,6 @@ public sealed class JsonConfigStore : IConfigStore, IDisposable
     /// v25: a stored Keeb.FirmwareLighting.Brightness equal to the old default (always persisted) moves to the new default. Profile files are covered by ProfileManager.
     /// v31: panel records' Flip180/Portrait fold into one clockwise Rotation (PanelRotationMigration).
     /// v32: the 8.8 inch strip's single layout moves to the slot of its mounted orientation (PanelLayoutSlotsMigration).
-    /// v33: the Strimer's shared speed and color list move under the effect they were set for (StrimerEffectsMigration).
     /// </summary>
     private static void Migrate(NexusSettings doc)
     {

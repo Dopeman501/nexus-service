@@ -123,6 +123,48 @@ public class StrimerEffectLooksTests
     }
 
     [Fact]
+    public void A_block_that_already_has_the_per_effect_keys_is_left_alone()
+    {
+        var ls = Migrated("{\"mode\":\"breathing\",\"speed\":3,\"colors\":[\"#111111\"],\"modeSpeeds\":{},\"modeColors\":{}}", out var s);
+        Assert.Equal(32, s.SchemaVersion);
+        Assert.Empty(ls.ModeSpeeds);
+        Assert.Equal(3, ls.Speed);
+        Assert.Single(ls.Colors);
+    }
+
+    [Fact]
+    public void Migrating_twice_changes_nothing_the_second_time()
+    {
+        var dir = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "nexus-strimer-mig-" + System.Guid.NewGuid().ToString("N")[..8]);
+        System.IO.Directory.CreateDirectory(dir);
+        try
+        {
+            var path = System.IO.Path.Combine(dir, "settings.json");
+            System.IO.File.WriteAllText(path, "{\"schemaVersion\":32,\"devices\":{\"strimerLighting\":{\"mode\":\"wave\",\"speed\":3,\"colors\":[\"#010203\"]}}}");
+            var first = new JsonConfigStore(path);
+            first.Load();
+            first.Dispose();
+            var second = new JsonConfigStore(path);
+            try
+            {
+                var ls = second.Load().Devices.StrimerLighting;
+                Assert.Equal(4, ls.Speed);
+                Assert.Equal(4, ls.ModeSpeeds["wave"]);
+                Assert.Equal(new List<string> { "#010203" }, ls.ModeColors["wave"]);
+                Assert.Empty(ls.Colors);
+            }
+            finally
+            {
+                second.Dispose();
+            }
+        }
+        finally
+        {
+            try { System.IO.Directory.Delete(dir, recursive: true); } catch { }
+        }
+    }
+
+    [Fact]
     public void A_document_with_no_Strimer_block_is_left_without_saved_speeds()
     {
         var ls = Migrated("", out _);
