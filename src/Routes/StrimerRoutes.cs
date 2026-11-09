@@ -30,8 +30,10 @@ public static partial class DevicesRoutes
                     HasBrightness= m.HasBrightness,
                     ColorsMin    = m.ColorsMin,
                     ColorsMax    = m.ColorsMax,
+                    DefaultColors= m.DefaultColors,
                 };
             }
+            var effectInfo = StrimerLightingModes.Find(ls.Mode != "custom" ? ls.Mode : ls.EffectMode ?? "rainbow");
             return Results.Json(new StrimerLightingResponse
             {
                 Mode      = ls.Mode,
@@ -39,7 +41,7 @@ public static partial class DevicesRoutes
                 Speed     = ls.Speed,
                 Direction = ls.Direction,
                 Brightness= ls.Brightness,
-                Colors    = ls.Colors.ToArray(),
+                Colors    = effectInfo == null ? Array.Empty<string>() : StrimerLightingModes.ResolveColors(ls, effectInfo),
                 Modes     = catalog,
                 ArgbSync  = ls.ArgbSync,
             }, AppJsonContext.Default.StrimerLightingResponse);
@@ -69,13 +71,16 @@ public static partial class DevicesRoutes
                 if (body.Brightness.HasValue) ls.Brightness = Math.Clamp(body.Brightness.Value, 0, 4);
                 if (body.Colors != null)
                 {
-                    var modeInfo  = StrimerLightingModes.Find(ls.Mode);
-                    var maxColors = modeInfo?.ColorsMax ?? 0;
-                    var count     = Math.Min(body.Colors.Length, maxColors);
-                    ls.Colors     = new List<string>(count);
-                    for (var i = 0; i < count; i++)
+                    var modeInfo = StrimerLightingModes.Find(ls.Mode != "custom" ? ls.Mode : ls.EffectMode ?? "rainbow");
+                    if (modeInfo is { ColorsMax: > 0 })
                     {
-                        ls.Colors.Add(body.Colors[i]);
+                        var merged = new List<string>(modeInfo.ColorsMax);
+                        var current = StrimerLightingModes.ResolveColors(ls, modeInfo);
+                        for (var i = 0; i < modeInfo.ColorsMax; i++)
+                        {
+                            merged.Add(i < body.Colors.Length ? body.Colors[i] : current[i]);
+                        }
+                        ls.ModeColors[modeInfo.Key] = merged;
                     }
                 }
                 if (body.ArgbSync.HasValue) ls.ArgbSync = body.ArgbSync.Value;
@@ -96,6 +101,7 @@ public sealed class StrimerModeInfoDto
     public bool   HasBrightness{ get; set; }
     public int    ColorsMin    { get; set; }
     public int    ColorsMax    { get; set; }
+    public string[] DefaultColors { get; set; } = Array.Empty<string>();
 }
 
 public sealed class StrimerLightingResponse

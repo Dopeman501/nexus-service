@@ -2279,7 +2279,10 @@ public sealed class StrimerLightingSettings
     public int Speed { get; set; } = 2;
     public int Direction { get; set; } = 0;
     public int Brightness { get; set; } = 4;
+    /// <summary>Palette shared by every mode before each mode kept its own; read only for a mode with no entry in <see cref="ModeColors"/>.</summary>
     public List<string> Colors { get; set; } = new();
+    /// <summary>Each mode's own palette by mode key.</summary>
+    public Dictionary<string, List<string>> ModeColors { get; set; } = new();
     /// <summary>The cable plays the motherboard ARGB header through the controller's sync cable instead of Nexus.</summary>
     public bool ArgbSync { get; set; }
 }

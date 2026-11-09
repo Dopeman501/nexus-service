@@ -222,15 +222,26 @@ public sealed class StrimerLightingFrameWriter : IHostedService, IDisposable
 
     private void CommitFirmwareMode(StrimerLightingSettings ls, StrimerModeInfo mode, MasterLevel globalBrightness)
     {
-        var speedByte      = StrimerLightingModes.SpeedCodes[Math.Clamp(ls.Speed, 0, 4)];
-        var dirByte        = StrimerLightingModes.DirectionByte(ls.Direction);
-        var brightnessByte = ComputeBrightnessByte(ls.Brightness, globalBrightness);
+        CommitFirmwareMode(_hub, ls, mode, ComputeBrightnessByte(ls.Brightness, globalBrightness));
+    }
 
-        for (var zone = 0; zone < StrimerProtocol.ZoneCount; zone++)
+    // Per zone the effect command goes first and its colors after, then one latch for the zones written.
+    internal static void CommitFirmwareMode(StrimerHub hub, StrimerLightingSettings ls, StrimerModeInfo mode, byte brightnessByte)
+    {
+        var speedByte = StrimerLightingModes.SpeedCodes[Math.Clamp(ls.Speed, 0, 4)];
+        var dirByte   = StrimerLightingModes.DirectionByte(mode, ls.Direction);
+        var colors    = StrimerLightingModes.FirmwareColors(ls, mode);
+        var zones     = StrimerLightingModes.FirmwareZones(mode);
+
+        var mask = 0;
+        foreach (var zone in zones)
         {
-            _hub.SendEffectCommit(zone, mode.EffectByte, speedByte, dirByte, brightnessByte);
+            hub.SendEffectCommit(zone, mode.EffectByte, speedByte, dirByte, brightnessByte);
+            if (colors.Length > 0) hub.SendColorData(zone, colors);
+            mask |= 1 << zone;
         }
-        _hub.SendApplyLatch();
+        if (mode.Complete) hub.SendApplyLatchMask(mask);
+        else hub.SendApplyLatch();
     }
 
     internal static byte ComputeBrightnessByte(int brightness, MasterLevel globalBrightness)
@@ -248,6 +259,11 @@ public sealed class StrimerLightingFrameWriter : IHostedService, IDisposable
         hc.Add(ls.Direction);
         hc.Add(ls.Brightness);
         hc.Add(globalBrightness);
+        var mode = StrimerLightingModes.Find(ls.Mode);
+        if (mode != null)
+        {
+            foreach (var c in StrimerLightingModes.ResolveColors(ls, mode)) hc.Add(c);
+        }
         return hc.ToHashCode();
     }
 }
