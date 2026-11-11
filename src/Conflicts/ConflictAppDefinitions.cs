@@ -380,6 +380,16 @@ public static class ConflictAppCatalog
             ProcessNames = new[] { "SmartFan" },
         },
 
+        // ── Colorful ───────────────────────────────────────────────────────
+        new()
+        {
+            Id = "colorful-igamecenter",
+            Vendors = new[] { "Colorful" },
+            DisplayName = "Colorful iGameCenter",
+            Category = "lighting",
+            ProcessNames = new[] { "iGameCenter" },
+        },
+
         // ── Corsair ────────────────────────────────────────────────────────
         new()
         {

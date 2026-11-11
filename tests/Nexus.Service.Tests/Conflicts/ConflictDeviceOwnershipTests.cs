@@ -18,6 +18,7 @@ public class ConflictDeviceOwnershipTests
     [InlineData("MSI", "msi-mystic-light")]
     [InlineData("NZXT", "nzxt-cam")]
     [InlineData("Gigabyte", "msi-gaming-center")]
+    [InlineData("Colorful", "colorful-igamecenter")]
     public void Vendor_resolves_to_its_apps(string vendor, string expectedId)
     {
         Assert.Contains(expectedId, ConflictDeviceOwnership.AppIdsForVendor(vendor));
