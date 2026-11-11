@@ -10,6 +10,14 @@ public sealed class LightingAudioTriggerSettings
     public double SwitchDelay { get; set; } = 1;
     public bool Shuffle { get; set; }
     public List<LightingAudioTriggerLook> Looks { get; set; } = new();
+    /// <summary>Per-lighting-card controls; absent fields inherit the master settings.</summary>
+    public Dictionary<string, LightingAudioTriggerDeviceOverride>? DeviceOverrides { get; set; }
+}
+
+public sealed class LightingAudioTriggerDeviceOverride
+{
+    public bool? Enabled { get; set; }
+    public double? Intensity { get; set; }
 }
 
 public sealed class LightingAudioTriggerLook

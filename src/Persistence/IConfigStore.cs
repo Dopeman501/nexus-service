@@ -19,6 +19,11 @@ public interface IConfigStore
     /// </summary>
     void Update(System.Action<NexusSettings> mutator);
 
+    /// <summary>Atomically commit an already-validated mutation only when it returns true. A false result must leave
+    /// the document untouched and causes no persistence or OnChanged notification.</summary>
+    bool TryUpdate(System.Func<NexusSettings, bool> mutator) =>
+        throw new System.NotSupportedException("This configuration store does not support conditional updates.");
+
     /// <summary>
     /// Runs <paramref name="reader"/> against the settings document without
     /// marking it dirty or raising OnChanged; the reader must not mutate. This

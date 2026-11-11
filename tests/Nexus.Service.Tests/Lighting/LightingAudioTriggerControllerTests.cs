@@ -8,10 +8,87 @@ namespace Nexus.Service.Tests.Lighting;
 
 public sealed class LightingAudioTriggerControllerTests
 {
+    [Fact]
+    public void Changing_one_device_keeps_other_active_detectors_and_built_resources_without_reentering_delay()
+    {
+        var builds = 0;
+        using var controller = new LightingAudioTriggerController(look => { builds++; return Build(look); });
+        var settings = LightingAudioTriggerTests.Settings(1);
+        controller.Configure(settings);
+        controller.SetRunning(true);
+        controller.PublishSample(1, 0, 0, 1000);
+        controller.Tick(true, 1000, 1000);
+        controller.PublishSample(1, 0, 0, 2000);
+        controller.Tick(true, 2000, 2000);
+        Assert.NotNull(controller.CanvasFor("ram"));
+        settings.DeviceOverrides = new() { ["fan"] = new() { Intensity = 90, Enabled = false } };
+        controller.Configure(settings);
+        controller.Tick(true, 2001, 2001);
+        Assert.NotNull(controller.CanvasFor("ram"));
+        Assert.Null(controller.CanvasFor("fan"));
+        Assert.Equal(1, builds);
+    }
+
+    [Fact]
+    public void Individual_sensitivities_and_disable_select_independent_trigger_canvases_with_shared_effects()
+    {
+        var builds = 0;
+        using var controller = new LightingAudioTriggerController(look => { builds++; return Build(look); });
+        var settings = LightingAudioTriggerTests.Settings(0);
+        settings.DeviceOverrides = new()
+        {
+            ["quiet"] = new() { Intensity = 100 }, ["loud"] = new() { Intensity = 0 },
+            ["off"] = new() { Enabled = false },
+        };
+        controller.Configure(settings);
+        controller.SetRunning(true);
+        controller.PublishSample(0.1f, 0, 0, 1000);
+        controller.Tick(true, 1000, 1000);
+        Assert.NotNull(controller.CanvasFor("quiet"));
+        Assert.Null(controller.CanvasFor("loud"));
+        Assert.Null(controller.CanvasFor("off"));
+        controller.PublishSample(1, 0, 0, 1200);
+        controller.Tick(true, 1200, 1200);
+        Assert.NotNull(controller.CanvasFor("loud"));
+        Assert.Equal(1, builds);
+        controller.SetRunning(false);
+        Assert.Null(controller.CanvasFor("quiet"));
+    }
+
     private static IEffect Build(Nexus.Service.Models.Lighting.LightingAudioTriggerLook look)
     {
         Assert.True(StaticColorHex.TryParse(look.Color, out var r, out var g, out var b));
         return new FlatColorEffect(r, g, b);
+    }
+
+    [Fact]
+    public async Task Quiet_device_reacts_independently_while_insensitive_and_disabled_devices_keep_pins_when_paused()
+    {
+        using var controller = new LightingAudioTriggerController(Build);
+        var pins = new DevicePinTracker();
+        pins.Set("quiet", new() { Kind = DevicePinKinds.Static, Color = "#0000ff" });
+        pins.Set("loud", new() { Kind = DevicePinKinds.Static, Color = "#0000ff" });
+        using var engine = new LightingEngine { FrameIntervalMs = 5, AudioTrigger = controller, Pins = pins };
+        var quiet = new DeviceFrame(0, "quiet", 1, 450, 250, 100, 100);
+        var loud = new DeviceFrame(1, "loud", 1, 450, 250, 100, 100);
+        engine.UpdateDevices([quiet, loud]);
+        var settings = LightingAudioTriggerTests.Settings(0);
+        settings.DeviceOverrides = new() { ["quiet"] = new() { Intensity = 100 }, ["loud"] = new() { Intensity = 0 } };
+        controller.Configure(settings);
+        controller.SetRunning(true);
+        engine.FramePublished += () => controller.PublishSample(0.1f, 0, 0, Environment.TickCount64);
+        engine.SetEffect(new FlatColorEffect(0, 255, 0));
+        await WaitFor(engine, quiet, [255, 0, 0]);
+        await WaitFor(engine, loud, [0, 0, 255]);
+        Assert.Null(controller.Canvas); // Only a device-specific sensitivity is active.
+        Assert.True(controller.AnyCanvas);
+        engine.SetPaused(true);
+        settings.DeviceOverrides["quiet"].Enabled = false;
+        controller.Configure(settings);
+        await WaitFor(engine, quiet, [0, 0, 255]);
+        Assert.True(engine.Paused);
+        engine.SetBlackout(true);
+        await WaitFor(engine, loud, [0, 0, 0]);
     }
 
     [Fact]

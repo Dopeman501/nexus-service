@@ -125,6 +125,10 @@ public static class RelayHttpAllowlist
         if (p.Length > 1 && p[^1] == '/')
             p = p[..^1];
 
+        // Only the existing trigger-controls resource is remote-authorized; no future children or verbs.
+        if (string.Equals(p, "/audio-trigger/targets", StringComparison.OrdinalIgnoreCase))
+            return HttpMethods.IsGet(method!) || HttpMethods.IsPost(method!);
+
         foreach (var denied in DeniedPaths)
         {
             if (string.Equals(p, denied, StringComparison.OrdinalIgnoreCase))

@@ -9,6 +9,24 @@ namespace Nexus.Service.Tests;
 /// </summary>
 public class JsonConfigStoreDebounceTests : IDisposable
 {
+    [Fact]
+    public void Conditional_update_does_not_flush_or_notify_rejection_but_commits_accepted_mutation()
+    {
+        using var store = new JsonConfigStore(_path);
+        store.Load();
+        var before = File.ReadAllBytes(_path);
+        var notifications = 0;
+        store.OnChanged += () => notifications++;
+        Assert.False(store.TryUpdate(_ => false));
+        store.FlushNow();
+        Assert.Equal(before, File.ReadAllBytes(_path));
+        Assert.Equal(0, notifications);
+        Assert.True(store.TryUpdate(settings => { settings.Lighting.Sync = "plasma"; return true; }));
+        store.FlushNow();
+        Assert.Equal("plasma", store.Load().Lighting.Sync);
+        Assert.Equal(1, notifications);
+    }
+
     private readonly string _tempDir;
     private readonly string _path;
 

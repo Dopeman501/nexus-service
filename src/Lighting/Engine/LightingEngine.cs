@@ -905,11 +905,11 @@ public sealed partial class LightingEngine : IDisposable
                         }
                         aheadDevices = devices;
                     }
-                    else if ((_studioOverlay is not null || AudioTrigger?.Canvas is not null || _resampleOnce || AnyAssignPollable()) && wakeMs <= 0)
+                    else if ((_studioOverlay is not null || AudioTrigger?.AnyCanvas == true || _resampleOnce || AnyAssignPollable()) && wakeMs <= 0)
                     {
                         // Paused: the effect holds, the studio overlay keeps animating over it, and once it clears the effect's paused frame is repainted onto the devices.
                         var devices = _devices;
-                        if (AudioTrigger?.Canvas is not null)
+                        if (AudioTrigger?.AnyCanvas == true)
                         {
                             SampleDevicesFromCanvas(devices);
                             ApplyLedColorLocks(devices);
@@ -1816,12 +1816,11 @@ public sealed partial class LightingEngine : IDisposable
         Dictionary<string, CanvasBuffer?>? pinned = null)
     {
         var originalCanvas = _sampleCanvas;
-        var trigger = AudioTrigger?.Canvas;
-        var baseCanvas = trigger ?? originalCanvas;
+        var baseCanvas = originalCanvas;
         try
         {
             var pinMap = pinned ?? _pinnedDevices;
-            SampleDevicesCore(devices, baseCanvas, trigger is null && honorPins && pinMap.Count > 0, pinMap);
+            SampleDevicesCore(devices, baseCanvas, honorPins && pinMap.Count > 0, pinMap);
         }
         finally
         {
@@ -1847,11 +1846,12 @@ public sealed partial class LightingEngine : IDisposable
         for (var di = 0; di < devices.Length; di++)
         {
             var dev = devices[di];
+            var trigger = AudioTrigger?.CanvasFor(dev.Id);
             // An animate or mirror pinned device samples its source's canvas, the main
             // one when it is pinned to what is running globally.
             CanvasBuffer? pinCanvas = null;
-            var onPinCanvas = honorPins && pinMap.TryGetValue(dev.Id, out pinCanvas) && pinCanvas is not null;
-            _sampleCanvas = onPinCanvas ? pinCanvas! : baseCanvas;
+            var onPinCanvas = trigger is null && honorPins && pinMap.TryGetValue(dev.Id, out pinCanvas) && pinCanvas is not null;
+            _sampleCanvas = trigger ?? (onPinCanvas ? pinCanvas! : baseCanvas);
             // Preview LED count from the editor's unsaved draft; clamped to the
             // physical buffer size because SetLed bounds-guards on LedCount.
             var ledCount = dev.PreviewLedCount is { } pc
@@ -1884,7 +1884,7 @@ public sealed partial class LightingEngine : IDisposable
             // unturned rect and turns with the whole frame.
             // A device on its own pin canvas follows that source alone: the
             // global sweep flag describes the main canvas, not this one.
-            var fullFrame = !onPinCanvas && AudioTrigger?.Canvas is null && FullFrameSampling;
+            var fullFrame = !onPinCanvas && trigger is null && FullFrameSampling;
             // A full-frame device's cell is a slice of the whole canvas, so it
             // takes the plain cell mean instead of the spot. See SampleLedBox.
             var rectX = fullFrame ? 0f : dev.X;
@@ -2231,7 +2231,7 @@ public sealed partial class LightingEngine : IDisposable
 
             // Identify and test overlays outrank a pin; a pin outranks the global source.
             if (Pins is not null
-                && AudioTrigger?.Canvas is null
+                && AudioTrigger?.CanvasFor(dev.Id) is null
                 && dev.TestPattern is null
                 && Pins.TryGet(dev.Id, out var assignment)
                 && assignment.Kind == Nexus.Service.Persistence.DevicePinKinds.Static)

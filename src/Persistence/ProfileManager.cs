@@ -318,6 +318,8 @@ public sealed partial class ProfileManager : IDisposable
 
             SaveProfileFile(id);
 
+            _store.Update(settings => settings.AudioTriggerControlEpoch = Guid.NewGuid().ToString("N"));
+
             _manifest.Profiles.Add(entry);
             _manifest.ActiveProfileId = id;
             SaveManifest();
@@ -708,6 +710,7 @@ public sealed partial class ProfileManager : IDisposable
             {
                 s.PrimaryProfileId = _manifest.ActiveProfileId;
                 s.SharedCategories = new List<string>();
+                s.AudioTriggerControlEpoch = Guid.NewGuid().ToString("N");
             });
             _dirty = false;
             activeAfter = _manifest.ActiveProfileId;
@@ -1074,12 +1077,14 @@ public sealed partial class ProfileManager : IDisposable
         var data = ReadProfileFile(profileId);
         if (data == null)
         {
+            _store.Update(settings => settings.AudioTriggerControlEpoch = Guid.NewGuid().ToString("N"));
             return;
         }
 
         _store.Update(s =>
         {
             // The record id, not the marker: an empty-layout profile sets the marker without handing anything over.
+            s.AudioTriggerControlEpoch = Guid.NewGuid().ToString("N");
             var overlayWasMigrated = s.Overlay.MigratedRecordId is not null;
             Nexus.Service.Lighting.PinMigration.Apply(data);
             s.Lighting = data.Lighting ?? new LightingSettings { FreeRotationLayouts = true };

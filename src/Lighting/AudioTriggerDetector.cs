@@ -18,11 +18,11 @@ internal static class AudioTriggerDetector
     internal static AudioTriggerState Initial => new(null, null, null, long.MinValue, 0);
 
     internal static AudioTriggerState Advance(AudioTriggerState state, LightingAudioTriggerSettings settings,
-        AudioTriggerSample? sample, long now, Func<double>? random = null)
+        AudioTriggerSample? sample, long now, Func<double>? random = null, double? intensity = null)
     {
         var count = settings.Looks.Count;
         if (!settings.Enabled || count == 0) return Initial;
-        var sensitivity = settings.Intensity / 100;
+        var sensitivity = (intensity ?? settings.Intensity) / 100;
         var playing = sample is { Valid: true } valid && valid.Level >= 0.55 - sensitivity * 0.535;
         var peak = playing ? Math.Max(sample!.Value.Bass, sample.Value.Beat) : 0;
         var delay = settings.SwitchDelay * 1000;

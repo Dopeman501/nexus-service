@@ -216,6 +216,8 @@ namespace Nexus.Service.Serialization;
 [JsonSerializable(typeof(List<float>))]
 [JsonSerializable(typeof(Nexus.Service.Models.Lighting.MusicReactiveBody))]
 [JsonSerializable(typeof(Nexus.Service.Models.Lighting.LightingAudioTriggerSettings))]
+[JsonSerializable(typeof(Nexus.Service.Models.Lighting.AudioTriggerTargetsResponse))]
+[JsonSerializable(typeof(Nexus.Service.Models.Lighting.AudioTriggerTargetsPatch))]
 [JsonSerializable(typeof(Nexus.Service.Models.Lighting.AudioOutputBody))]
 [JsonSerializable(typeof(Nexus.Service.Models.Lighting.SleepBlackoutBody))]
 [JsonSerializable(typeof(Nexus.Service.Models.Lighting.LockBlackoutBody))]

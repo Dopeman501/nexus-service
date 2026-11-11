@@ -42,6 +42,8 @@ public class RelayHttpAllowlistTests
     [InlineData("POST", "/sentry/disarm")]
     [InlineData("PUT", "/panel/phone/push")]
     [InlineData("DELETE", "/panel/phone/push")]
+    [InlineData("GET", "/audio-trigger/targets")]
+    [InlineData("POST", "/audio-trigger/targets?controls=enabled")]
     public void Allows_PanelAndControlSurface(string method, string path)
         => Assert.True(RelayHttpAllowlist.IsAllowed(method, path));
 
@@ -78,6 +80,9 @@ public class RelayHttpAllowlistTests
     [InlineData("GET", "/onboarding")]                // dashboard-only first-run flags
     [InlineData("POST", "/onboarding/reset")]
     [InlineData("GET", "/onboarding/panel-swipeX")]  // not a segment boundary
+    [InlineData("GET", "/audio-trigger/targets/extra")]
+    [InlineData("POST", "/audio-trigger/anything")]
+    [InlineData("DELETE", "/audio-trigger/targets")]
     public void Rejects_SocketHighBandwidthAndOffAllowlist(string method, string path)
         => Assert.False(RelayHttpAllowlist.IsAllowed(method, path));
 

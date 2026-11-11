@@ -14,6 +14,10 @@ namespace Nexus.Service.Persistence;
 /// </summary>
 public sealed class NexusSettings
 {
+    /// <summary>Runtime identity for queued trigger controls; never persisted or copied into a profile.</summary>
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string AudioTriggerControlEpoch { get; set; } = System.Guid.NewGuid().ToString("N");
+
     /// <summary>
     /// Latest persisted-settings schema number. Bump in lockstep when adding
     /// a migration in <c>JsonConfigStore.Load()</c>. Lives as a constant so

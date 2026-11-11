@@ -22,7 +22,10 @@ internal static class LightingAudioTriggerPolicy
         }
         if (!double.IsFinite(value.Intensity) || value.Intensity is < 0 or > 100
             || !double.IsFinite(value.SwitchDelay) || value.SwitchDelay is < 0 or > 10
-            || value.Looks is not { Count: <= MaximumLooks } || value.Looks.Any(look => !ValidLook(look)))
+            || value.Looks is not { Count: <= MaximumLooks } || value.Looks.Any(look => !ValidLook(look))
+            || value.DeviceOverrides is { Count: > 512 }
+            || value.DeviceOverrides?.Any(pair => string.IsNullOrWhiteSpace(pair.Key) || pair.Key.Length > 256
+                || pair.Value is null || (pair.Value.Intensity is { } intensity && (!double.IsFinite(intensity) || intensity is < 0 or > 100))) == true)
         {
             return false;
         }
@@ -72,6 +75,8 @@ internal static class LightingAudioTriggerPolicy
         return new()
         {
             Enabled = value.Enabled, Intensity = value.Intensity, SwitchDelay = value.SwitchDelay, Shuffle = value.Shuffle,
+            DeviceOverrides = value.DeviceOverrides?.OrderBy(pair => pair.Key, StringComparer.Ordinal).ToDictionary(pair => pair.Key,
+                pair => new LightingAudioTriggerDeviceOverride { Enabled = pair.Value.Enabled, Intensity = pair.Value.Intensity }, StringComparer.Ordinal),
             Looks = value.Looks.Select(look => new LightingAudioTriggerLook
             {
                 Mode = look.Mode, Color = look.Color?.ToLowerInvariant(), Effect = look.Effect, MediaId = look.MediaId,

@@ -90,6 +90,7 @@ public static class LightingRoutes
     public static void MapLightingEndpoints(this WebApplication app)
     {
         LightingAudioTriggerRoutes.Map(app);
+        AudioTriggerTargetsRoutes.Map(app);
         app.MapPost("/lighting/stop", (ILightingProvider l, MultiplexHub hub) => { l.StopAll(); ResetEffectSignature(); PanelTopics.BroadcastLighting(hub); return ApiResponse.Ok(); }).AllowPanel();
         app.MapGet("/lighting/current", (ILightingProvider l) => new CurrentSyncResponse { Sync = l.GetSync(), Paused = l.IsPaused, StudioLive = l.StudioLiveActive }).AllowPanel();
         // Freeze/resume the active effect's rendered frame. No-op with no active
