@@ -25,15 +25,17 @@ licenses. Their respective license texts ship alongside the bundled binaries.
 
 - **Project**: FFmpeg
 - **Upstream**: https://ffmpeg.org
-- **License**: GNU Lesser General Public License version 2.1 or later
-  (LGPL-2.1-or-later)
-- **License text**: shipped with the bundled binary at `ffmpeg/LICENSE.txt`
+- **License**: GNU General Public License version 2 or later (GPL-2.0-or-later)
+  for the minimal build with statically linked x264
+- **License text**: shipped with the bundled binary at `tools/ffmpeg/LICENSE.txt`
   in the publish output
 - **Build**: compiled from unmodified upstream release source by
-  `scripts/build-ffmpeg-minimal.sh` with an LGPL-only configuration
-  (`--disable-gpl --disable-nonfree`); no GPL components are enabled and no
-  source changes are made, so the corresponding source is the upstream
-  release tarball of the pinned version
+  `scripts/build-ffmpeg-minimal.sh` with `--enable-gpl --enable-libx264` and
+  `--disable-nonfree`. The Windows `.23` bundle reports FFmpeg 7.1 and x264
+  core 165. The recipe pins FFmpeg 7.1, zlib 1.3.1 and bzip2 1.0.8, but uses
+  the moving x264 `stable` branch. The historical binary's exact x264 commit
+  is not recorded or verified; the application source archive and recipe
+  must not be described as complete verified corresponding runtime source.
 - **Communication boundary**: launched as a separate child process; this
   service does not link against the FFmpeg libraries
 

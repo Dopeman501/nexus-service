@@ -142,8 +142,9 @@ dotnet publish -c Release -r linux-x64 -o publish-linux
   `Bundled/<rid>/openrgb/`. Build them from
   [`nexus-rgb`](https://github.com/hello-nexus/nexus-rgb) first; the csproj
   error spells out the commands.
-- The bundled ffmpeg is stock upstream ffmpeg with a minimal LGPL-only
-  configuration, compiled by `scripts/build-ffmpeg-minimal.sh`. It is optional
+- The bundled ffmpeg uses a minimal GPL configuration with static x264,
+  compiled by `scripts/build-ffmpeg-minimal.sh`; see `THIRD-PARTY.md` for the
+  verified version and historical source-provenance limit. It is optional
   at build time: `bash scripts/fetch-ffmpeg.sh all` (or `mac | win | linux`)
   produces it once per RID.
 - `Bundled/win-x64/angle/` holds the ANGLE `libEGL.dll` and `libGLESv2.dll`
