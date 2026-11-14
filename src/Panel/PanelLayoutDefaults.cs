@@ -43,6 +43,8 @@ public static class PanelLayoutDefaults
     /// </summary>
     public static PanelLayoutDto WithStableIds(PanelLayoutDto layout, string seed)
     {
+        var homePageId = PanelHomePagePolicy.Resolve(layout);
+        var homePageIndex = homePageId is null ? -1 : layout.Pages.FindIndex(page => page.Id == homePageId);
         for (var p = 0; p < layout.Pages.Count; p++)
         {
             var page = layout.Pages[p];
@@ -55,6 +57,7 @@ public static class PanelLayoutDefaults
             for (var i = 0; i < circles.Count; i++)
                 circles[i]?.Id = StableId(seed, $"d215-panel{i}");
         }
+        layout.HomePageId = homePageIndex >= 0 ? layout.Pages[homePageIndex].Id : null;
         return layout;
     }
 

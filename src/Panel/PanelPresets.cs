@@ -86,9 +86,15 @@ public static class PanelPresets
 
     // Widget settings edit the layout in place, so a shared reference would
     // leak the live edit into the stored preset.
-    public static PanelLayoutDto? CloneLayout(PanelLayoutDto? layout) => layout is null
-        ? null
-        : JsonSerializer.Deserialize(
+    public static PanelLayoutDto? CloneLayout(PanelLayoutDto? layout)
+    {
+        if (layout is null) return null;
+        var clone = JsonSerializer.Deserialize(
             JsonSerializer.SerializeToUtf8Bytes(layout, PersistenceJsonContext.Default.PanelLayoutDto),
-            PersistenceJsonContext.Default.PanelLayoutDto);
+            PersistenceJsonContext.Default.PanelLayoutDto)!;
+        // Presets and profile imports use this same copy boundary, including
+        // layouts received from older builds or whose home page was deleted.
+        clone.HomePageId = PanelHomePagePolicy.Resolve(clone);
+        return clone;
+    }
 }

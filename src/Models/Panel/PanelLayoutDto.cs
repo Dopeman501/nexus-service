@@ -25,6 +25,13 @@ public sealed class PanelLayoutDto
     public string? ActivePageId { get; set; }
 
     /// <summary>
+    /// Persisted home/startup page, independent of the currently displayed page.
+    /// Must name a stored page; null uses the first page. The render-only blank
+    /// page is never a home target.
+    /// </summary>
+    public string? HomePageId { get; set; }
+
+    /// <summary>
     /// Single-widget surfaces (Q-series) show one widget at a time. Swapping
     /// which widget is shown would otherwise discard the outgoing widget's
     /// config; this remembers each widget type's last config so switching back
@@ -49,9 +56,10 @@ public sealed class PanelLayoutDto
 
     /// <summary>
     /// Id of the widget the panel opens straight into immersive view on load,
-    /// skipping the dashboard. At most one per layout, and it must live on the
-    /// FIRST page - the web client clears this when the id names no widget
-    /// there. Null (the default) means the panel opens on the dashboard.
+    /// skipping the dashboard. At most one per layout; it is active only on
+    /// the Y70's effective home page (first page when unset) or the first page
+    /// on other surfaces. A mark on another page remains stored but inert.
+    /// Null (the default) means the panel opens on the dashboard.
     /// </summary>
     public string? ImmersiveOnLoadWidgetId { get; set; }
 }

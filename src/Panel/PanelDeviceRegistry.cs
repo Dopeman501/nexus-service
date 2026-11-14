@@ -776,7 +776,7 @@ public sealed class PanelDeviceRegistry
                     record.DisplayName = name;
             }
             if (patch.Layout is not null)
-                record.Layout = patch.Layout;
+                record.Layout = PanelHomePagePolicy.Normalize(patch.Layout);
             if (patch.ThemeMode is not null)
                 record.ThemeMode = NullIfEmpty(patch.ThemeMode);
             if (patch.AccentColor is not null)
