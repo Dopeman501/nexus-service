@@ -754,6 +754,13 @@ public sealed class PanelDeviceRegistry
             return null;
         if (!PanelAudioTriggerPolicy.IsValid(patch.BackgroundAudioTrigger))
             throw new ArgumentException("invalid_background_audio_trigger", nameof(patch));
+        if (!PanelBackgroundTransitionsPolicy.IsValid(patch.BackgroundTransitions)
+            || !PanelAudioTriggerBeatTransitionPolicy.IsValid(patch.BackgroundAudioTriggerBeatTransition)
+            || !PanelBackgroundTransitionPolicy.IsValid(patch.BackgroundMediaTransition)
+            || !PanelBackgroundTransitionPolicy.IsValid(patch.BackgroundAudioTriggerTransition))
+        {
+            throw new ArgumentException("invalid_background_transition", nameof(patch));
+        }
 
         PanelDeviceRecord? snapshot = null;
         var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -782,6 +789,19 @@ public sealed class PanelDeviceRegistry
                 record.BackgroundMode = NullIfEmpty(patch.BackgroundMode);
             if (patch.BackgroundAudioTrigger is not null)
                 record.BackgroundAudioTrigger = PanelAudioTriggerPolicy.Clone(patch.BackgroundAudioTrigger);
+            if (patch.BackgroundTransitions is not null)
+            {
+                // A first main edit must not change the beat timing inherited from the old main preference.
+                if (record.BackgroundAudioTriggerBeatTransition is null && patch.BackgroundAudioTriggerBeatTransition is null)
+                    record.BackgroundAudioTriggerBeatTransition = PanelAudioTriggerBeatTransitionPolicy.FromMain(record);
+                record.BackgroundTransitions = PanelBackgroundTransitionsPolicy.Clone(patch.BackgroundTransitions);
+            }
+            if (patch.BackgroundAudioTriggerBeatTransition is not null)
+                record.BackgroundAudioTriggerBeatTransition = PanelAudioTriggerBeatTransitionPolicy.Clone(patch.BackgroundAudioTriggerBeatTransition);
+            if (patch.BackgroundMediaTransition is not null)
+                record.BackgroundMediaTransition = PanelBackgroundTransitionPolicy.Clone(patch.BackgroundMediaTransition);
+            if (patch.BackgroundAudioTriggerTransition is not null)
+                record.BackgroundAudioTriggerTransition = PanelBackgroundTransitionPolicy.Clone(patch.BackgroundAudioTriggerTransition);
             if (patch.BackgroundEffect is not null)
                 record.BackgroundEffect = NullIfEmpty(Nexus.Service.Lighting.SimplePatternMigration.Normalize(patch.BackgroundEffect));
             if (patch.BackgroundTemplate.HasValue)
@@ -938,6 +958,10 @@ public sealed class PanelDeviceRegistry
             record.BackgroundColorLight = null;
             record.BackgroundMode = null;
             record.BackgroundAudioTrigger = null;
+            record.BackgroundTransitions = null;
+            record.BackgroundAudioTriggerBeatTransition = null;
+            record.BackgroundMediaTransition = null;
+            record.BackgroundAudioTriggerTransition = null;
             record.BackgroundEffect = null;
             record.BackgroundTemplate = null;
             record.BackgroundTemplates = null;
@@ -1297,6 +1321,10 @@ public sealed class PanelDeviceRegistry
             BackgroundColorLight = r.BackgroundColorLight,
             BackgroundMode = r.BackgroundMode,
             BackgroundAudioTrigger = PanelAudioTriggerPolicy.Clone(r.BackgroundAudioTrigger),
+            BackgroundTransitions = PanelBackgroundTransitionsPolicy.Clone(r.BackgroundTransitions),
+            BackgroundAudioTriggerBeatTransition = PanelAudioTriggerBeatTransitionPolicy.Clone(r.BackgroundAudioTriggerBeatTransition),
+            BackgroundMediaTransition = PanelBackgroundTransitionPolicy.Clone(r.BackgroundMediaTransition),
+            BackgroundAudioTriggerTransition = PanelBackgroundTransitionPolicy.Clone(r.BackgroundAudioTriggerTransition),
             BackgroundEffect = r.BackgroundEffect,
             BackgroundTemplate = r.BackgroundTemplate,
             BackgroundTemplates = r.BackgroundTemplates is null

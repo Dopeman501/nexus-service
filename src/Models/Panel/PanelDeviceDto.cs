@@ -30,6 +30,10 @@ public sealed class PanelDeviceRecord : IPanelPersonalization
     public string? BackgroundColorLight { get; set; }
     public string? BackgroundMode { get; set; }
     public PanelAudioTriggerDto? BackgroundAudioTrigger { get; set; }
+    public PanelBackgroundTransitionsDto? BackgroundTransitions { get; set; }
+    public PanelAudioTriggerBeatTransitionDto? BackgroundAudioTriggerBeatTransition { get; set; }
+    public PanelBackgroundTransitionDto? BackgroundMediaTransition { get; set; }
+    public PanelBackgroundTransitionDto? BackgroundAudioTriggerTransition { get; set; }
     public string? BackgroundEffect { get; set; }
     public int? BackgroundTemplate { get; set; }
     /// <summary>
@@ -275,6 +279,10 @@ public interface IPanelPersonalization
     string? BackgroundColorLight { get; set; }
     string? BackgroundMode { get; set; }
     PanelAudioTriggerDto? BackgroundAudioTrigger { get; set; }
+    PanelBackgroundTransitionsDto? BackgroundTransitions { get; set; }
+    PanelAudioTriggerBeatTransitionDto? BackgroundAudioTriggerBeatTransition { get; set; }
+    PanelBackgroundTransitionDto? BackgroundMediaTransition { get; set; }
+    PanelBackgroundTransitionDto? BackgroundAudioTriggerTransition { get; set; }
     string? BackgroundEffect { get; set; }
     int? BackgroundTemplate { get; set; }
     Dictionary<string, int>? BackgroundTemplates { get; set; }
@@ -323,6 +331,10 @@ public sealed class PanelPreset : IAppBoundPreset, IPanelPersonalization
     public string? BackgroundColorLight { get; set; }
     public string? BackgroundMode { get; set; }
     public PanelAudioTriggerDto? BackgroundAudioTrigger { get; set; }
+    public PanelBackgroundTransitionsDto? BackgroundTransitions { get; set; }
+    public PanelAudioTriggerBeatTransitionDto? BackgroundAudioTriggerBeatTransition { get; set; }
+    public PanelBackgroundTransitionDto? BackgroundMediaTransition { get; set; }
+    public PanelBackgroundTransitionDto? BackgroundAudioTriggerTransition { get; set; }
     public string? BackgroundEffect { get; set; }
     public int? BackgroundTemplate { get; set; }
     public Dictionary<string, int>? BackgroundTemplates { get; set; }
@@ -443,6 +455,10 @@ public sealed class PanelDevicePatch
     public string? BackgroundColorLight { get; set; }
     public string? BackgroundMode { get; set; }
     public PanelAudioTriggerDto? BackgroundAudioTrigger { get; set; }
+    public PanelBackgroundTransitionsDto? BackgroundTransitions { get; set; }
+    public PanelAudioTriggerBeatTransitionDto? BackgroundAudioTriggerBeatTransition { get; set; }
+    public PanelBackgroundTransitionDto? BackgroundMediaTransition { get; set; }
+    public PanelBackgroundTransitionDto? BackgroundAudioTriggerTransition { get; set; }
     public string? BackgroundEffect { get; set; }
     public int? BackgroundTemplate { get; set; }
     /// <summary>Full per-shader preset map to replace this panel's selection

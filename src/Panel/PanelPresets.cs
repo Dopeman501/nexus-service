@@ -36,6 +36,10 @@ public static class PanelPresets
         to.BackgroundColorLight = from.BackgroundColorLight;
         to.BackgroundMode = from.BackgroundMode;
         to.BackgroundAudioTrigger = PanelAudioTriggerPolicy.Clone(from.BackgroundAudioTrigger);
+        to.BackgroundTransitions = PanelBackgroundTransitionsPolicy.Clone(from.BackgroundTransitions);
+        to.BackgroundAudioTriggerBeatTransition = PanelAudioTriggerBeatTransitionPolicy.Clone(from.BackgroundAudioTriggerBeatTransition);
+        to.BackgroundMediaTransition = PanelBackgroundTransitionPolicy.Clone(from.BackgroundMediaTransition);
+        to.BackgroundAudioTriggerTransition = PanelBackgroundTransitionPolicy.Clone(from.BackgroundAudioTriggerTransition);
         to.BackgroundEffect = from.BackgroundEffect;
         to.BackgroundTemplate = from.BackgroundTemplate;
         to.BackgroundTemplates = from.BackgroundTemplates is null ? null : new Dictionary<string, int>(from.BackgroundTemplates);

@@ -364,6 +364,13 @@ public static class PanelRoutes
         {
             if (!PanelAudioTriggerPolicy.IsValid(body.BackgroundAudioTrigger))
                 return Results.BadRequest(ApiResponse.Fail("invalid_background_audio_trigger"));
+            if (!PanelBackgroundTransitionsPolicy.IsValid(body.BackgroundTransitions)
+                || !PanelAudioTriggerBeatTransitionPolicy.IsValid(body.BackgroundAudioTriggerBeatTransition)
+                || !PanelBackgroundTransitionPolicy.IsValid(body.BackgroundMediaTransition)
+                || !PanelBackgroundTransitionPolicy.IsValid(body.BackgroundAudioTriggerTransition))
+            {
+                return Results.BadRequest(ApiResponse.Fail("invalid_background_transition"));
+            }
             var existing = body.Capabilities is not null || body.LcdBrightness.HasValue || body.Portrait.HasValue
                 || body.Layout?.D215Panels is not null || body.Layout?.D215Widget is not null
                 ? registry.Get(id)
