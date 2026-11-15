@@ -997,10 +997,15 @@ public sealed class PostProcessSettings
 public sealed class KeyReaction
 {
     public bool Enabled { get; set; }
+    /// <summary>Explicit physical layout for a supported zoned keyboard; null leaves its reactions disabled.</summary>
+    public string? KeyboardLayout { get; set; }
     public string Effect { get; set; } = Nexus.Service.Lighting.KeyReactive.KeyReactionCatalog.Ripple;
-    /// <summary>"custom" paints <see cref="Color"/>; "rainbow" steps the hue per press; "random" picks one per press.</summary>
+    /// <summary>"custom" cycles <see cref="Colors"/> or paints legacy <see cref="Color"/>; "rainbow" steps the hue per press; "random" picks one per press.</summary>
     public string ColorMode { get; set; } = Nexus.Service.Lighting.KeyReactive.KeyReactionCatalog.ColorCustom;
     public string Color { get; set; } = Nexus.Service.Lighting.KeyReactive.KeyReactionCatalog.DefaultColor;
+    /// <summary>Optional ordered custom palette; absent uses the legacy single <see cref="Color"/>.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public List<string>? Colors { get; set; }
     /// <summary>Time multiplier on every effect clock.</summary>
     public float Speed { get; set; } = 1f;
     /// <summary>Spatial multiplier on every effect's reach.</summary>

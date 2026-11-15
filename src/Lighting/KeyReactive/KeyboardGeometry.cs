@@ -13,6 +13,7 @@ public sealed class KeyboardGeometry
 {
     private readonly Dictionary<string, int> _byName;
     private readonly bool[] _active;
+    private readonly bool _positionFallback;
 
     public int LedCount { get; }
     public float[] X { get; }
@@ -23,14 +24,19 @@ public sealed class KeyboardGeometry
     public float MaxY { get; }
     /// <summary>LEDs whose name resolved into the key-name space.</summary>
     public int NamedKeys => _byName.Count;
+    public bool UsesExplicitMapping => !_positionFallback;
+    internal K55CoreReactionLayout? CoreLayout { get; }
 
-    private KeyboardGeometry(float[] x, float[] y, bool[] active, Dictionary<string, int> byName)
+    private KeyboardGeometry(float[] x, float[] y, bool[] active, Dictionary<string, int> byName, bool positionFallback = true,
+        float? boardWidth = null, float? boardHeight = null, K55CoreReactionLayout? coreLayout = null)
     {
         LedCount = x.Length;
         X = x;
         Y = y;
         _active = active;
         _byName = byName;
+        _positionFallback = positionFallback;
+        CoreLayout = coreLayout;
         float minX = float.MaxValue, maxX = float.MinValue, minY = float.MaxValue, maxY = float.MinValue;
         for (var i = 0; i < x.Length; i++)
         {
@@ -42,7 +48,17 @@ public sealed class KeyboardGeometry
         }
         if (minX > maxX) { minX = maxX = minY = maxY = 0; }
         MinX = minX; MaxX = maxX; MinY = minY; MaxY = maxY;
+        if (boardWidth is { } width && boardHeight is { } height)
+        {
+            MinX = MinY = 0;
+            MaxX = width;
+            MaxY = height;
+        }
     }
+
+    /// <summary>Explicit many-key-to-zone mapping; unmatched keys must not fall back to positional estimation.</summary>
+    internal static KeyboardGeometry BuildMapped(float[] x, float[] y, bool[] active, Dictionary<string, int> byName,
+        float width, float height, K55CoreReactionLayout? coreLayout = null) => new(x, y, active, byName, false, width, height, coreLayout);
 
     public bool IsActive(int led) => led >= 0 && led < _active.Length && _active[led];
 
@@ -88,7 +104,7 @@ public sealed class KeyboardGeometry
             if (_byName.TryGetValue(candidate, out var led)) return led;
         }
         // Named boards are trusted: a key they do not list is a key they lack.
-        if (_byName.Count > 0) return -1;
+        if (_byName.Count > 0 || !_positionFallback) return -1;
         return ResolveByPosition(canonical);
     }
 

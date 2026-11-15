@@ -78,6 +78,8 @@ public sealed class DeviceFrame
     public string? DeviceId { get; set; }
     /// <summary>Hardware LED name per LED ("Key: A" on OpenRGB keyboards), null where the board names none. Key reactions resolve presses through it.</summary>
     public string?[]? LedKeys { get; set; }
+    /// <summary>Verified shared-zone keyboard capability, including physical-to-card-local projection.</summary>
+    public Nexus.Service.Lighting.KeyReactive.K55CoreReactionLayout? ReactionLayout { get; set; }
 
     public void SetLed(int i, byte r, byte g, byte b)
     {

@@ -36,6 +36,7 @@ public static class KeyReactionCatalog
     public static readonly string[] Backgrounds = { BackgroundEffect, BackgroundDim, BackgroundDark, BackgroundReveal };
 
     public const string DefaultColor = "#ff2d55";
+    public const int MaxPaletteColors = 16;
 
     public const float MinSpeed = 0.25f;
     public const float MaxSpeed = 3f;
@@ -49,18 +50,54 @@ public static class KeyReactionCatalog
     public static KeyReaction Sanitize(KeyReaction? input)
     {
         var src = input ?? new KeyReaction();
+        var colors = SanitizePalette(src.Colors);
         return new KeyReaction
         {
             Enabled = src.Enabled,
+            KeyboardLayout = K55CoreReactionLayout.IsKnownLayout(src.KeyboardLayout) ? src.KeyboardLayout : null,
             Effect = Pick(src.Effect, Effects, Ripple),
             ColorMode = Pick(src.ColorMode, ColorModes, ColorCustom),
-            Color = StaticColorHex.TryParse(src.Color, out var r, out var g, out var b)
+            Color = colors is { Count: > 0 } ? colors[0] : StaticColorHex.TryParse(src.Color, out var r, out var g, out var b)
                 ? $"#{r:x2}{g:x2}{b:x2}"
                 : DefaultColor,
+            Colors = colors,
             Speed = Clamp(src.Speed, MinSpeed, MaxSpeed, 1f),
             Size = Clamp(src.Size, MinSize, MaxSize, 1f),
             Background = Pick(src.Background, Backgrounds, BackgroundEffect),
         };
+    }
+
+    /// <summary>Resolve imported/stored and request configs against the actual device's capability without rewriting stored data.</summary>
+    public static KeyReaction SanitizeForDevice(Nexus.Service.Lighting.Engine.DeviceFrame frame, KeyReaction? input)
+    {
+        var clean = Sanitize(input);
+        if (frame.ReactionLayout is null) return clean;
+        return new KeyReaction
+        {
+            Enabled = clean.Enabled && K55CoreReactionLayout.IsKnownLayout(clean.KeyboardLayout),
+            KeyboardLayout = clean.KeyboardLayout,
+            Effect = clean.Effect is Fade or Ripple ? clean.Effect : Ripple,
+            ColorMode = clean.ColorMode, Color = clean.Color, Colors = clean.Colors,
+            Speed = clean.Speed, Size = clean.Size, Background = clean.Background,
+        };
+    }
+
+    /// <summary>Inspect only the first sixteen submitted slots; return an independent ordered palette or null for legacy fallback.</summary>
+    private static List<string>? SanitizePalette(List<string>? input)
+    {
+        if (input is not { Count: > 0 }) return null;
+        var colors = new List<string>(Math.Min(input.Count, MaxPaletteColors));
+        for (var i = 0; i < Math.Min(input.Count, MaxPaletteColors); i++)
+        {
+            var hex = input[i];
+            if (hex is not { Length: 7 } || hex[0] != '#') continue;
+            var valid = true;
+            for (var c = 1; c < hex.Length; c++) valid &= char.IsAsciiHexDigit(hex[c]);
+            if (!valid) continue;
+            var normalized = hex.ToLowerInvariant();
+            if (!colors.Contains(normalized)) colors.Add(normalized);
+        }
+        return colors.Count > 0 ? colors : null;
     }
 
     private static string Pick(string? value, string[] allowed, string fallback) =>

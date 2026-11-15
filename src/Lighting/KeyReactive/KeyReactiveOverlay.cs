@@ -20,7 +20,9 @@ public sealed class KeyReactiveOverlay
 {
     // DeviceId null = an OS key press for every board without its own key source;
     // CardId set = a simulated press on that card.
-    private readonly record struct PendingPress(string? DeviceId, string? CardId, string? Key, int? Led, long AtMs);
+    private readonly record struct PendingPress(string? DeviceId, string? CardId, string? Key, int? Led, long AtMs,
+        string? Epoch = null, string? LayoutRevision = null);
+    private sealed record ZoneDevices(HashSet<string> Known, HashSet<string> Connected, Dictionary<string, DeviceFrame> Cards);
 
     private sealed class BoardState
     {
@@ -29,6 +31,11 @@ public sealed class KeyReactiveOverlay
         public float[]? V;
         public string?[]? Names;
         public bool[]? Disabled;
+        public K55CoreReactionLayout? ZoneLayout;
+        public string? Region;
+        public KeyReaction? ConfigSource;
+        public KeyReaction? Config;
+        public K55CoreReactionLayout? ConfigLayout;
         public string Effect = "";
         public readonly KeyReactionRenderer Renderer = new();
     }
@@ -48,6 +55,8 @@ public sealed class KeyReactiveOverlay
     private readonly ConcurrentDictionary<string, bool> _hardwareSources = new(StringComparer.Ordinal);
     private readonly Random _rng = new();
     private Dictionary<string, KeyReaction> _configs = new(StringComparer.Ordinal);
+    private ZoneDevices _zoneDevices = new(new(StringComparer.Ordinal), new(StringComparer.Ordinal), new(StringComparer.Ordinal));
+    private string? _profileEpoch;
     private bool _armed;
 
     /// <summary>Raised when the OS key source should start or stop listening; handlers run under the overlay's config lock and must not block.</summary>
@@ -74,9 +83,44 @@ public sealed class KeyReactiveOverlay
     public KeyReaction Get(string deviceId) =>
         Volatile.Read(ref _configs).TryGetValue(deviceId, out var cfg) ? cfg : KeyReactionCatalog.Sanitize(null);
 
+    public KeyReaction Get(DeviceFrame frame) => KeyReactionCatalog.SanitizeForDevice(frame, Get(ConfigKey(frame)));
+
+    public KeyReaction Set(DeviceFrame frame, KeyReaction cfg) => Set(ConfigKey(frame), KeyReactionCatalog.SanitizeForDevice(frame, cfg));
+
     /// <summary>True when <paramref name="deviceId"/> has reactions on.</summary>
     public bool IsEnabled(string deviceId) =>
-        Volatile.Read(ref _configs).TryGetValue(deviceId, out var cfg) && cfg.Enabled;
+        Volatile.Read(ref _configs).TryGetValue(deviceId, out var cfg) && EffectiveEnabled(deviceId, cfg, Volatile.Read(ref _zoneDevices));
+
+    public bool IsEnabled(DeviceFrame frame) => Volatile.Read(ref _configs).TryGetValue(ConfigKey(frame), out var cfg)
+        && cfg.Enabled && (frame.ReactionLayout is null || K55CoreReactionLayout.IsKnownLayout(cfg.KeyboardLayout));
+
+    /// <summary>Publish connected capability identity without touching saved settings. Remember configured CORE ids across disconnects.</summary>
+    public void UpdateDevices(DeviceFrame[] devices)
+    {
+        lock (_hydrateLock)
+        {
+            var configs = Volatile.Read(ref _configs);
+            var known = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var id in Volatile.Read(ref _zoneDevices).Known)
+                if (configs.ContainsKey(id)) known.Add(id);
+            var connected = new HashSet<string>(StringComparer.Ordinal);
+            var cards = new Dictionary<string, DeviceFrame>(StringComparer.Ordinal);
+            foreach (var dev in devices)
+            {
+                if (dev.ReactionLayout is null || !IsKeyboard(dev)) continue;
+                connected.Add(ConfigKey(dev));
+                cards[dev.Id] = dev;
+            }
+            foreach (var dev in devices)
+                if (dev.ReactionLayout is null && IsKeyboard(dev) && !connected.Contains(ConfigKey(dev))) known.Remove(ConfigKey(dev));
+            known.UnionWith(connected);
+            Volatile.Write(ref _zoneDevices, new ZoneDevices(known, connected, cards));
+            Publish(configs);
+        }
+    }
+
+    private static bool EffectiveEnabled(string id, KeyReaction cfg, ZoneDevices devices) => cfg.Enabled
+        && (!devices.Known.Contains(id) || devices.Connected.Contains(id) && K55CoreReactionLayout.IsKnownLayout(cfg.KeyboardLayout));
 
     /// <summary>Persists <paramref name="cfg"/> for <paramref name="deviceId"/> and returns the stored, sanitised copy.</summary>
     public KeyReaction Set(string deviceId, KeyReaction cfg)
@@ -128,8 +172,22 @@ public sealed class KeyReactiveOverlay
     }
 
     /// <summary>A simulated press on one card: at <paramref name="key"/>, else at <paramref name="led"/>, else a random key.</summary>
-    public void PressOn(string cardId, string? key, int? led = null) =>
-        Enqueue(new PendingPress(null, cardId, key, led, Environment.TickCount64));
+    public void PressOn(string cardId, string? key, int? led = null, string? expectedEpoch = null)
+    {
+        if (Volatile.Read(ref _zoneDevices).Cards.TryGetValue(cardId, out var frame))
+            TryPressOn(frame, key, led, expectedEpoch, null);
+        else Enqueue(new PendingPress(null, cardId, key, led, Environment.TickCount64, expectedEpoch));
+    }
+
+    internal static string? LayoutRevisionOf(DeviceFrame frame) => frame.ReactionLayout?.Revision(frame.LedDisabled);
+
+    internal bool TryPressOn(DeviceFrame frame, string? key, int? led, string? epoch, string? expectedLayoutRevision)
+    {
+        var revision = LayoutRevisionOf(frame);
+        if (expectedLayoutRevision is not null && expectedLayoutRevision != revision) return false;
+        Enqueue(new PendingPress(ConfigKey(frame), frame.Id, key, led, Environment.TickCount64, epoch, revision));
+        return true;
+    }
 
     private void Enqueue(PendingPress press)
     {
@@ -155,26 +213,28 @@ public sealed class KeyReactiveOverlay
     }
 
     /// <summary>Same geometry the engine pass uses, for <paramref name="dev"/>; null when it is not a per-key keyboard.</summary>
-    public static KeyboardGeometry? GeometryOf(DeviceFrame dev) =>
-        IsKeyboard(dev) ? KeyboardGeometry.Build(dev.LedU!, dev.LedV!, dev.LedKeys, dev.LedDisabled) : null;
+    public static KeyboardGeometry? GeometryOf(DeviceFrame dev, KeyReaction? cfg = null) => !IsKeyboard(dev) ? null
+        : dev.ReactionLayout is { } zones ? zones.BuildGeometry(cfg?.KeyboardLayout, dev.LedDisabled)
+        : KeyboardGeometry.Build(dev.LedU!, dev.LedV!, dev.LedKeys, dev.LedDisabled);
 
     public static bool IsKeyboard(DeviceFrame dev) =>
         dev.Archetype == "keyboard"
-        && dev.LedCount >= KeyReactionCatalog.MinKeyLeds
+        && (dev.ReactionLayout is { } zones && zones.LedCount == dev.LedCount
+            || dev.LedCount >= KeyReactionCatalog.MinKeyLeds
         && dev.LedU is { } u && dev.LedV is { } v
-        && u.Length == dev.LedCount && v.Length == dev.LedCount;
+        && u.Length == dev.LedCount && v.Length == dev.LedCount);
 
     /// <summary>Engine thread: drain presses and paint every enabled board not in <paramref name="skip"/>. True when any frame was repainted.</summary>
     public bool Apply(DeviceFrame[] devices, bool[]? skip, long nowMs)
     {
-        var configs = Volatile.Read(ref _configs);
-        if (configs.Count == 0)
-        {
-            _pending.Clear();
-            return false;
-        }
         lock (_paintLock)
         {
+            var configs = Volatile.Read(ref _configs);
+            if (configs.Count == 0)
+            {
+                _pending.Clear();
+                return false;
+            }
             DrainPresses(devices, configs, nowMs);
             var painted = false;
             for (var di = 0; di < devices.Length; di++)
@@ -194,14 +254,15 @@ public sealed class KeyReactiveOverlay
     /// </summary>
     public bool PaintStandalone(DeviceFrame[] frames, long nowMs)
     {
-        var configs = Volatile.Read(ref _configs);
         var any = false;
         lock (_paintLock)
         {
+            var configs = Volatile.Read(ref _configs);
             DrainPresses(frames, configs, nowMs);
             foreach (var dev in frames)
             {
                 if (!configs.TryGetValue(ConfigKey(dev), out var cfg) || !cfg.Enabled) continue;
+                if (BoardFor(dev, cfg) is null) continue;
                 dev.Fill(0, 0, 0);
                 Paint(dev, configs, nowMs, standalone: true);
                 any = true;
@@ -213,13 +274,14 @@ public sealed class KeyReactiveOverlay
     private bool Paint(DeviceFrame dev, Dictionary<string, KeyReaction> configs, long nowMs, bool standalone)
     {
         if (!configs.TryGetValue(ConfigKey(dev), out var cfg) || !cfg.Enabled) return false;
-        var board = BoardFor(dev);
+        var board = BoardFor(dev, cfg);
         if (board?.Geometry is not { } geo) return false;
+        cfg = board.Config!;
         SyncEffect(board, cfg);
         var drew = board.Renderer.Render(geo, cfg, nowMs);
         // Over black there is nothing to reveal, so reveal paints the reaction instead.
         var background = standalone && cfg.Background == KeyReactionCatalog.BackgroundReveal
-            ? KeyReactionCatalog.BackgroundEffect
+            ? KeyReactionCatalog.BackgroundDark
             : cfg.Background;
         // A plain overlay with nothing drawn leaves the frame alone; the other
         // backgrounds repaint the whole board every frame.
@@ -232,16 +294,19 @@ public sealed class KeyReactiveOverlay
     {
         while (_pending.TryDequeue(out var press))
         {
+            if (press.Epoch is not null && press.Epoch != _profileEpoch) continue;
             if (nowMs - press.AtMs > StalePressMs) continue;
             foreach (var dev in devices)
             {
                 var key = ConfigKey(dev);
                 if (press.CardId is not null && press.CardId != dev.Id) continue;
+                if (press.CardId is not null && press.LayoutRevision != LayoutRevisionOf(dev)) continue;
                 if (press.DeviceId is not null && press.DeviceId != key) continue;
                 if (press.DeviceId is null && press.CardId is null && _hardwareSources.ContainsKey(key)) continue;
                 if (!configs.TryGetValue(key, out var cfg) || !cfg.Enabled) continue;
-                var board = BoardFor(dev);
+                var board = BoardFor(dev, cfg);
                 if (board?.Geometry is not { } geo) continue;
+                cfg = board.Config!;
                 SyncEffect(board, cfg);
                 var led = press.Key is not null ? geo.Resolve(press.Key)
                     : press.Led is { } index ? index
@@ -251,7 +316,7 @@ public sealed class KeyReactiveOverlay
         }
     }
 
-    private BoardState? BoardFor(DeviceFrame dev)
+    private BoardState? BoardFor(DeviceFrame dev, KeyReaction cfg)
     {
         if (!IsKeyboard(dev)) return null;
         if (!_boards.TryGetValue(dev.Id, out var board))
@@ -259,15 +324,29 @@ public sealed class KeyReactiveOverlay
             board = new BoardState();
             _boards[dev.Id] = board;
         }
+        if (!ReferenceEquals(board.ConfigSource, cfg) || !ReferenceEquals(board.ConfigLayout, dev.ReactionLayout))
+        {
+            board.ConfigSource = cfg;
+            board.ConfigLayout = dev.ReactionLayout;
+            board.Config = KeyReactionCatalog.SanitizeForDevice(dev, cfg);
+        }
+        if (board.Config is not { Enabled: true } effective)
+        {
+            board.Renderer.Reset();
+            return null;
+        }
         // Layout arrays are swapped whole on change, so reference checks catch every edit.
         if (board.Geometry is null || !ReferenceEquals(board.U, dev.LedU) || !ReferenceEquals(board.V, dev.LedV)
-            || !ReferenceEquals(board.Names, dev.LedKeys) || !ReferenceEquals(board.Disabled, dev.LedDisabled))
+            || !ReferenceEquals(board.Names, dev.LedKeys) || !ReferenceEquals(board.Disabled, dev.LedDisabled)
+            || !ReferenceEquals(board.ZoneLayout, dev.ReactionLayout) || board.Region != effective.KeyboardLayout)
         {
             board.U = dev.LedU;
             board.V = dev.LedV;
             board.Names = dev.LedKeys;
             board.Disabled = dev.LedDisabled;
-            board.Geometry = KeyboardGeometry.Build(dev.LedU!, dev.LedV!, dev.LedKeys, dev.LedDisabled);
+            board.ZoneLayout = dev.ReactionLayout;
+            board.Region = effective.KeyboardLayout;
+            board.Geometry = GeometryOf(dev, effective);
             board.Renderer.Reset();
         }
         return board;
@@ -296,23 +375,25 @@ public sealed class KeyReactiveOverlay
         if (store is null) return;
         lock (_hydrateLock)
         {
-            // Load() hands back the live document, so a write landing mid-read
-            // can invalidate the enumeration; the next attempt sees it whole.
-            Dictionary<string, KeyReaction> next;
-            for (var attempt = 0; ; attempt++)
+            var next = new Dictionary<string, KeyReaction>(StringComparer.Ordinal);
+            string? epoch = null;
+            store.Read(settings =>
             {
-                try
+                epoch = settings.AudioTriggerControlEpoch;
+                foreach (var (id, cfg) in settings.Lighting.KeyReactions)
                 {
-                    next = new Dictionary<string, KeyReaction>(StringComparer.Ordinal);
-                    foreach (var (id, cfg) in store.Load().Lighting.KeyReactions)
-                    {
-                        if (!string.IsNullOrEmpty(id)) next[id] = KeyReactionCatalog.Sanitize(cfg);
-                    }
-                    break;
+                    if (!string.IsNullOrEmpty(id)) next[id] = KeyReactionCatalog.Sanitize(cfg);
                 }
-                catch (InvalidOperationException) when (attempt < 3)
+            });
+            lock (_paintLock)
+            {
+                if (_profileEpoch != epoch)
                 {
+                    _profileEpoch = epoch;
+                    _pending.Clear();
+                    _boards.Clear();
                 }
+                Volatile.Write(ref _configs, next);
             }
             Publish(next);
         }
@@ -322,9 +403,10 @@ public sealed class KeyReactiveOverlay
     {
         Volatile.Write(ref _configs, next);
         var armed = false;
+        var zoneDevices = Volatile.Read(ref _zoneDevices);
         foreach (var (id, cfg) in next)
         {
-            if (cfg.Enabled && !_hardwareSources.ContainsKey(id)) { armed = true; break; }
+            if (EffectiveEnabled(id, cfg, zoneDevices) && !_hardwareSources.ContainsKey(id)) { armed = true; break; }
         }
         // Callers hold _hydrateLock, so arm changes are raised in the order they happen.
         if (armed == Volatile.Read(ref _armed)) return;

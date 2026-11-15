@@ -160,6 +160,7 @@ public sealed partial class LightingEngine : IDisposable
     public void UpdateDevices(DeviceFrame[] devices)
     {
         _devices = devices;
+        KeyReactive?.UpdateDevices(devices);
         PruneAreaCaches(devices);
     }
 
@@ -180,7 +181,16 @@ public sealed partial class LightingEngine : IDisposable
     /// <summary>Per-LED colour locks, painted after every other pass. Null in tests.</summary>
     public Nexus.Service.Lighting.LedColorLockTracker? LedColorLocks { get; set; }
     /// <summary>Lights keyboards as keys are pressed; painted after the canvas sample, under the colour locks.</summary>
-    public Nexus.Service.Lighting.KeyReactive.KeyReactiveOverlay? KeyReactive { get; set; }
+    private Nexus.Service.Lighting.KeyReactive.KeyReactiveOverlay? _keyReactive;
+    public Nexus.Service.Lighting.KeyReactive.KeyReactiveOverlay? KeyReactive
+    {
+        get => Volatile.Read(ref _keyReactive);
+        set
+        {
+            Volatile.Write(ref _keyReactive, value);
+            value?.UpdateDevices(_devices);
+        }
+    }
 
     /// <summary>
     /// Per-device pins. Set once at wire-up; null in tests and any host that
@@ -1276,7 +1286,7 @@ public sealed partial class LightingEngine : IDisposable
                 needsGlobal = true;
             }
             // Reactions follow live key presses, which a pre-rendered loop cannot know.
-            if (KeyReactive?.IsEnabled(Nexus.Service.Lighting.KeyReactive.KeyReactiveOverlay.ConfigKey(d)) == true)
+            if (KeyReactive?.IsEnabled(d) == true)
             {
                 return false;
             }

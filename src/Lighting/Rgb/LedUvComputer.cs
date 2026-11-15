@@ -15,6 +15,11 @@ public static class LedUvComputer
         {
             return UniversalScreenRing.Positions();
         }
+        var core = Nexus.Service.Lighting.KeyReactive.K55CoreReactionLayout.Create(device, 0, device.LedCount);
+        if (core is not null)
+        {
+            return (core.NormalizedX(), core.NormalizedY());
+        }
 
         var ledU = new float[device.LedCount];
         var ledV = new float[device.LedCount];

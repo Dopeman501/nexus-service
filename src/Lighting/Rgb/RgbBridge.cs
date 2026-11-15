@@ -1640,6 +1640,15 @@ public sealed class RgbBridge : IDisposable
         {
             existing.Archetype = ArchetypeForDevice(physicalDevice);
             existing.DeviceId = structure?.DeviceId ?? id;
+            var reactionLayout = Nexus.Service.Lighting.KeyReactive.K55CoreReactionLayout.Create(
+                physicalDevice, zoneOffset, zoneLedCount, zone is { IsDefault: false } ? zone.Slices : null);
+            if (reactionLayout is not null || existing.ReactionLayout is not null)
+            {
+                // CORE's ten slots may be reordered into custom cards even when
+                // ids and counts match. Resolve current slices before reusing buffers.
+                var refreshed = ResolveFrameLayout(physicalDevice, zoneIndex, id, settings, structure, zone);
+                RefreshCoreLayout(existing, reactionLayout, refreshed);
+            }
             framesList.Add(existing);
             return;
         }
@@ -1669,23 +1678,12 @@ public sealed class RgbBridge : IDisposable
         // Default-partition zones keep the legacy zone-index resolution with
         // overrides mapped through their slices; custom zones resolve through
         // the partition-aware path.
-        Nexus.Service.Lighting.Mappings.ResolvedLedLayout resolved;
-        if (structure is not null && zone is not null && !zone.IsDefault)
-        {
-            resolved = Nexus.Service.Lighting.Mappings.LedLayoutResolver.ResolveZoneOpenRgb(
-                physicalDevice, structure, zone, settings);
-        }
-        else
-        {
-            var ctx = structure is not null && zone is not null
-                ? Nexus.Service.Lighting.Zones.ZoneResolution.ContextOf(structure, zone)
-                : null;
-            resolved = Nexus.Service.Lighting.Mappings.LedLayoutResolver.ResolveOpenRgb(
-                physicalDevice, zoneIndex, id, settings, ctx);
-        }
+        var resolved = ResolveFrameLayout(physicalDevice, zoneIndex, id, settings, structure, zone);
         Nexus.Service.Lighting.Mappings.LedLayoutResolver.ApplyToFrame(frame, resolved);
         frame.Archetype = ArchetypeForDevice(physicalDevice);
         frame.DeviceId = structure?.DeviceId ?? id;
+        AssignReactionLayout(frame, Nexus.Service.Lighting.KeyReactive.K55CoreReactionLayout.Create(
+            physicalDevice, resolved.GlobalOffset, zoneLedCount, zone is { IsDefault: false } ? zone.Slices : null));
         if (frame.Archetype == "keyboard")
         {
             frame.LedKeys = zone is null || zone.IsDefault
@@ -1693,6 +1691,36 @@ public sealed class RgbBridge : IDisposable
                 : LedNamesForSlices(physicalDevice, zone.Slices, zoneLedCount);
         }
         framesList.Add(frame);
+    }
+
+    private static Nexus.Service.Lighting.Mappings.ResolvedLedLayout ResolveFrameLayout(RgbDevice physicalDevice,
+        int zoneIndex, string id, NexusSettings settings, Nexus.Service.Lighting.Zones.DeviceStructure? structure,
+        Nexus.Service.Lighting.Zones.ResolvedZone? zone)
+    {
+        if (structure is not null && zone is { IsDefault: false })
+            return Nexus.Service.Lighting.Mappings.LedLayoutResolver.ResolveZoneOpenRgb(physicalDevice, structure, zone, settings);
+        var context = structure is not null && zone is not null
+            ? Nexus.Service.Lighting.Zones.ZoneResolution.ContextOf(structure, zone) : null;
+        return Nexus.Service.Lighting.Mappings.LedLayoutResolver.ResolveOpenRgb(physicalDevice, zoneIndex, id, settings, context);
+    }
+
+    private static void AssignReactionLayout(DeviceFrame frame, Nexus.Service.Lighting.KeyReactive.K55CoreReactionLayout? layout)
+    {
+        if (layout is not null && frame.ReactionLayout?.SameProjection(layout) == true) layout = frame.ReactionLayout;
+        frame.ReactionLayout = layout;
+    }
+
+    internal static void RefreshCoreLayout(DeviceFrame frame, Nexus.Service.Lighting.KeyReactive.K55CoreReactionLayout? layout,
+        Nexus.Service.Lighting.Mappings.ResolvedLedLayout resolved)
+    {
+        // Reference identity retires reaction state. A periodic refresh of the
+        // same ten positions must keep those references and the active fade.
+        if (!frame.LedU.AsSpan().SequenceEqual(resolved.U) || !frame.LedV.AsSpan().SequenceEqual(resolved.V)
+            || !frame.LedDisabled.AsSpan().SequenceEqual(resolved.Disabled))
+        {
+            Nexus.Service.Lighting.Mappings.LedLayoutResolver.ApplyToFrame(frame, resolved);
+        }
+        AssignReactionLayout(frame, layout);
     }
 
     private static string?[]? LedNameSlice(RgbDevice d, int offset, int count)

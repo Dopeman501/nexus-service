@@ -1,5 +1,5 @@
 {
-  "count": 2033,
+  "count": 2034,
   "devices": [
     {
       "name": "Bloody B820R",
@@ -2680,6 +2680,14 @@
       "controller": "CorsairICueLinkController",
       "kind": "hid",
       "type": "cooler"
+    },
+    {
+      "name": "Corsair K55 CORE RGB",
+      "vid": "0x1B1C",
+      "pid": "0x1BFE",
+      "controller": "CorsairK55CoreController",
+      "kind": "hid",
+      "type": "keyboard"
     },
     {
       "name": "Corsair 1000D Obsidian",

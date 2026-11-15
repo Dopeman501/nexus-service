@@ -20,27 +20,34 @@ public static class KeyReactionPreview
         ("N", 150), ("E", 400), ("X", 650), ("U", 900), ("S", 1150), ("Space", 1600), ("Enter", 2050),
     };
 
+    private static readonly (string Key, int AtMs)[] ZoneScript =
+    {
+        ("Escape", 150), ("Q", 400), ("E", 650), ("Space", 900), ("I", 1150),
+        ("P", 1400), ("Enter", 1650), ("Up Arrow", 1900), ("Number Pad 1", 2150), ("Number Pad Enter", 2400),
+    };
+
     public static KeyReactivePreviewResponse Render(KeyboardGeometry geo, KeyReaction cfg)
     {
         var clean = KeyReactionCatalog.Sanitize(cfg);
+        var script = geo.UsesExplicitMapping ? ZoneScript : Script;
         var renderer = new KeyReactionRenderer(seed: 1);
         var n = geo.LedCount;
         var frameCount = LoopMs * Fps / 1000;
         var frames = new byte[frameCount * n * 3];
-        var leds = new int[Script.Length];
-        for (var i = 0; i < Script.Length; i++)
+        var leds = new int[script.Length];
+        for (var i = 0; i < script.Length; i++)
         {
-            var led = geo.Resolve(Script[i].Key);
-            leds[i] = led >= 0 ? led : Fallback(geo, i);
+            var led = geo.Resolve(script[i].Key);
+            leds[i] = led >= 0 || geo.UsesExplicitMapping ? led : Fallback(geo, i);
         }
 
         var next = 0;
         for (var f = 0; f < frameCount; f++)
         {
             var now = f * 1000.0 / Fps;
-            while (next < Script.Length && Script[next].AtMs <= now)
+            while (next < script.Length && script[next].AtMs <= now)
             {
-                renderer.Press(geo, leds[next], clean, Script[next].AtMs);
+                renderer.Press(geo, leds[next], clean, script[next].AtMs);
                 next++;
             }
             var frame = frames.AsSpan(f * n * 3, n * 3);
@@ -56,6 +63,7 @@ public static class KeyReactionPreview
             Fps = Fps,
             FrameCount = frameCount,
             Frames = Convert.ToBase64String(frames),
+            ZoneLighting = geo.UsesExplicitMapping,
         };
         for (var i = 0; i < n; i++)
         {

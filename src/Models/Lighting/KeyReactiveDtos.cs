@@ -6,6 +6,8 @@ namespace Nexus.Service.Models.Lighting;
 /// <summary>GET /lighting/key-reactive.</summary>
 public sealed class KeyReactiveStateResponse
 {
+    /// <summary>Runtime profile generation shared by queued controls; scopes optional expectedEpoch requests.</summary>
+    public string Epoch { get; set; } = "";
     /// <summary>True when a key source is live (the Windows user-session helper); presses still work from the press route without one.</summary>
     public bool InputAvailable { get; set; }
     public List<KeyReactiveDeviceDto> Devices { get; set; } = new();
@@ -25,6 +27,12 @@ public sealed class KeyReactiveDeviceDto
     public int LedCount { get; set; }
     /// <summary>LEDs the board names; zero means presses match keys by position.</summary>
     public int NamedKeys { get; set; }
+    public bool ZoneLighting { get; set; }
+    public List<string> SupportedEffects { get; set; } = new();
+    public List<string> KeyboardLayouts { get; set; } = new();
+    /// <summary>CORE card projection/disabled identity; omitted for ordinary per-key keyboards.</summary>
+    [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
+    public string? LayoutRevision { get; set; }
     public KeyReaction Config { get; set; } = new();
 }
 
@@ -48,4 +56,5 @@ public sealed class KeyReactivePreviewResponse
     public int FrameCount { get; set; }
     /// <summary>Base64 of FrameCount frames, each LED count x RGB bytes.</summary>
     public string Frames { get; set; } = "";
+    public bool ZoneLighting { get; set; }
 }

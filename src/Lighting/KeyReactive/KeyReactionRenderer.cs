@@ -46,6 +46,9 @@ public sealed class KeyReactionRenderer
     private const float TraceWidth = 0.6f;
     private const float RainbowStepDegrees = 37f;
     private const float DimLevel = 0.18f;
+    private const float OverEffectReactionLevel = 0.18f;
+    // Keep a full-opacity peak visible across ordinary 30 fps output samples.
+    private const float OverEffectPeakHoldMs = 80f;
 
     private static readonly (float X, float Y)[] RowDirs = { (1, 0), (-1, 0) };
     private static readonly (float X, float Y)[] ColumnDirs = { (0, 1), (0, -1) };
@@ -77,6 +80,11 @@ public sealed class KeyReactionRenderer
     private float[] _heat = Array.Empty<float>();
     private double _heatAtMs = double.NaN;
     private float _hueCursor;
+    // Bounded snapshot detects a changed palette even if an imported caller mutates its list.
+    // Like existing random/rainbow state, this cursor belongs to this keyboard card.
+    private readonly string?[] _customPalette = new string?[KeyReactionCatalog.MaxPaletteColors];
+    private int _customPaletteCount, _customColorCursor;
+    private string? _customLegacyColor, _colorMode;
     private float _lastX, _lastY;
     private double _lastPressMs = double.NegativeInfinity;
 
@@ -96,6 +104,7 @@ public sealed class KeyReactionRenderer
         _active.Clear();
         Array.Clear(_heat);
         _lastPressMs = double.NegativeInfinity;
+        _customColorCursor = 0;
     }
 
     public void Press(KeyboardGeometry geo, int led, KeyReaction cfg, double nowMs)
@@ -103,15 +112,18 @@ public sealed class KeyReactionRenderer
         if (!geo.IsActive(led)) return;
         var x = geo.X[led];
         var y = geo.Y[led];
-        var (r, g, b) = PressColor(cfg);
         var size = cfg.Size;
         var effect = cfg.Effect;
 
         if (effect == KeyReactionCatalog.Heatmap)
         {
+            // Preserve the old random/rainbow progression; an explicit custom
+            // palette is not consumed by this colour-independent effect.
+            if (cfg.ColorMode != KeyReactionCatalog.ColorCustom || cfg.Colors is not { Count: > 0 }) PressColor(cfg);
             AddHeat(geo, x, y, size);
             return;
         }
+        var (r, g, b) = PressColor(cfg);
         if (effect == KeyReactionCatalog.Fade)
         {
             // A held-down repeat or a second tap restarts the key rather than stacking.
@@ -164,6 +176,7 @@ public sealed class KeyReactionRenderer
         Array.Clear(_a, 0, n);
         var speed = cfg.Speed;
         var size = cfg.Size;
+        var overEffect = cfg.Background == KeyReactionCatalog.BackgroundEffect;
         var any = false;
 
         if (cfg.Effect == KeyReactionCatalog.Heatmap)
@@ -181,14 +194,20 @@ public sealed class KeyReactionRenderer
             var reaction = _active[i];
             var t = (float)((nowMs - reaction.StartMs) * speed);
             if (t < 0) t = 0;
+            // Captured black is custom colour: random/rainbow presses never
+            // produce zero RGB. Keep older coloured reactions at their width.
+            var wideBlack = overEffect && geo.CoreLayout is not null
+                && reaction.R == 0f && reaction.G == 0f && reaction.B == 0f;
             bool live = reaction.Effect switch
             {
-                KeyReactionCatalog.Fade => PaintFade(geo, reaction, t, size),
+                KeyReactionCatalog.Fade => PaintFade(geo, reaction,
+                    overEffect ? Math.Max(0f, t - speed * OverEffectPeakHoldMs) : t, size, wideBlack),
                 KeyReactionCatalog.RowSweep => PaintRays(geo, reaction, t, size, RowDirs),
                 KeyReactionCatalog.ColumnSweep => PaintRays(geo, reaction, t, size, ColumnDirs),
                 KeyReactionCatalog.Crosshair => PaintRays(geo, reaction, t, size, CrossDirs),
                 KeyReactionCatalog.Starburst => PaintRays(geo, reaction, t, size, StarDirs),
-                KeyReactionCatalog.Ripple => PaintRipple(geo, reaction, t, size, cfg.ColorMode == KeyReactionCatalog.ColorRainbow),
+                KeyReactionCatalog.Ripple => PaintRipple(geo, reaction, t, size,
+                    cfg.ColorMode == KeyReactionCatalog.ColorRainbow && !wideBlack, overEffect, speed, wideBlack),
                 KeyReactionCatalog.Sparks => PaintSparks(reaction, t),
                 KeyReactionCatalog.Lightning => PaintBolt(geo, reaction, t, size),
                 KeyReactionCatalog.Trace => PaintTrace(geo, reaction, t, size),
@@ -215,6 +234,7 @@ public sealed class KeyReactionRenderer
             _ => 1f,
         };
         var reveal = background == KeyReactionCatalog.BackgroundReveal;
+        var overEffect = background == KeyReactionCatalog.BackgroundEffect;
         for (var i = 0; i < n; i++)
         {
             var o = i * 3;
@@ -227,6 +247,17 @@ public sealed class KeyReactionRenderer
                 continue;
             }
             var keep = baseScale * (1f - a);
+            if (overEffect)
+            {
+                // Keep the reaction darker than a bright base. The colour layer
+                // accumulates overlaps, while its opacity uses their strongest
+                // mask, so cap each premultiplied channel at that opacity.
+                var level = 255f * OverEffectReactionLevel;
+                rgb[o] = ToByte(rgb[o] * keep + Math.Min(_r[i], a) * level);
+                rgb[o + 1] = ToByte(rgb[o + 1] * keep + Math.Min(_g[i], a) * level);
+                rgb[o + 2] = ToByte(rgb[o + 2] * keep + Math.Min(_b[i], a) * level);
+                continue;
+            }
             rgb[o] = ToByte(rgb[o] * keep + _r[i] * 255f);
             rgb[o + 1] = ToByte(rgb[o + 1] * keep + _g[i] * 255f);
             rgb[o + 2] = ToByte(rgb[o + 2] * keep + _b[i] * 255f);
@@ -235,13 +266,20 @@ public sealed class KeyReactionRenderer
 
     // ── Effects ──
 
-    private bool PaintFade(KeyboardGeometry geo, Reaction r, float t, float size)
+    private bool PaintFade(KeyboardGeometry geo, Reaction r, float t, float size, bool wideBlack)
     {
         if (t >= FadeMs) return false;
         var k = 1f - t / FadeMs;
         var level = k * k;
         var radius = FadeRadius * size;
         PaintDisc(geo, r.X, r.Y, radius, level, r.R, r.G, r.B);
+        if (wideBlack)
+        {
+            var neighbour = geo.CoreLayout!.NeighbourIndex(r.Led, false);
+            if (geo.IsActive(neighbour)) Add(neighbour, level, 0, 0, 0);
+            neighbour = geo.CoreLayout.NeighbourIndex(r.Led, true);
+            if (geo.IsActive(neighbour)) Add(neighbour, level, 0, 0, 0);
+        }
         return true;
     }
 
@@ -274,19 +312,34 @@ public sealed class KeyReactionRenderer
         return true;
     }
 
-    private bool PaintRipple(KeyboardGeometry geo, Reaction r, float t, float size, bool rainbow)
+    private bool PaintRipple(KeyboardGeometry geo, Reaction r, float t, float size,
+        bool rainbow, bool fullPeak, float speed, bool wideBlack)
     {
         var radius = t * RippleKeysPerMs;
         var width = RippleWidth * size;
-        if (radius - width > r.Reach) return false;
-        var fade = 1f - Math.Clamp(radius / (r.Reach + width), 0f, 1f);
+        var holdWidth = fullPeak ? RippleKeysPerMs * speed * OverEffectPeakHoldMs : 0f;
+        if (radius - width - holdWidth > r.Reach) return false;
+        // Over effect needs an opaque peak even at distant keys so a black
+        // ripple can switch them fully off. Its spatial tail restores the base.
+        var fade = fullPeak ? 1f : 1f - Math.Clamp(radius / (r.Reach + width), 0f, 1f);
         for (var i = 0; i < geo.LedCount; i++)
         {
             if (!geo.IsActive(i)) continue;
             var dx = geo.X[i] - r.X;
             var dy = geo.Y[i] - r.Y;
             var d = MathF.Sqrt(dx * dx + dy * dy);
-            var k = 1f - MathF.Abs(d - radius) / width;
+            var edgeDistance = MathF.Abs(d - radius);
+            if (fullPeak)
+            {
+                var behind = radius - d;
+                edgeDistance = behind < 0 ? -behind : Math.Max(0f, behind - holdWidth);
+            }
+            var k = 1f - edgeDistance / width;
+            if (wideBlack)
+            {
+                k = Math.Max(k, BlackRippleNeighbourMask(geo, r, geo.CoreLayout!.NeighbourIndex(i, false), radius, width, holdWidth));
+                k = Math.Max(k, BlackRippleNeighbourMask(geo, r, geo.CoreLayout.NeighbourIndex(i, true), radius, width, holdWidth));
+            }
             if (k <= 0) continue;
             if (rainbow)
             {
@@ -299,6 +352,16 @@ public sealed class KeyReactionRenderer
             }
         }
         return true;
+    }
+
+    private static float BlackRippleNeighbourMask(KeyboardGeometry geo, Reaction r, int led, float radius, float width, float holdWidth)
+    {
+        if (!geo.IsActive(led)) return 0f;
+        var dx = geo.X[led] - r.X;
+        var dy = geo.Y[led] - r.Y;
+        var behind = radius - MathF.Sqrt(dx * dx + dy * dy);
+        var edgeDistance = behind < 0 ? -behind : Math.Max(0f, behind - holdWidth);
+        return Math.Max(0f, 1f - edgeDistance / width);
     }
 
     private bool PaintSparks(Reaction r, float t)
@@ -454,7 +517,9 @@ public sealed class KeyReactionRenderer
             var hue = cfg.ColorMode == KeyReactionCatalog.ColorCustom
                 ? baseHue + ((float)_rng.NextDouble() - 0.5f) * 50f
                 : (float)_rng.NextDouble() * 360f;
-            (rgb[s * 3], rgb[s * 3 + 1], rgb[s * 3 + 2]) = Hsv(hue, 1f, 1f);
+            (rgb[s * 3], rgb[s * 3 + 1], rgb[s * 3 + 2]) =
+                cfg.ColorMode == KeyReactionCatalog.ColorCustom && cfg.Colors is { Count: > 0 }
+                    ? (reaction.R, reaction.G, reaction.B) : Hsv(hue, 1f, 1f);
         }
         reaction.SparkLeds = leds;
         reaction.SparkDelays = delays;
@@ -509,6 +574,11 @@ public sealed class KeyReactionRenderer
 
     private (float R, float G, float B) PressColor(KeyReaction cfg)
     {
+        if (_colorMode != cfg.ColorMode)
+        {
+            _colorMode = cfg.ColorMode;
+            _customColorCursor = 0;
+        }
         switch (cfg.ColorMode)
         {
             case KeyReactionCatalog.ColorRainbow:
@@ -517,10 +587,29 @@ public sealed class KeyReactionRenderer
             case KeyReactionCatalog.ColorRandom:
                 return Hsv((float)_rng.NextDouble() * 360f, 1f, 1f);
             default:
-                return StaticColorHex.TryParse(cfg.Color, out var r, out var g, out var b)
+                return StaticColorHex.TryParse(NextCustomColor(cfg), out var r, out var g, out var b)
                     ? (r / 255f, g / 255f, b / 255f)
                     : (1f, 0.18f, 0.33f);
         }
+    }
+
+    private string NextCustomColor(KeyReaction cfg)
+    {
+        var count = Math.Min(cfg.Colors?.Count ?? 0, KeyReactionCatalog.MaxPaletteColors);
+        var changed = count != _customPaletteCount || count == 0 && _customLegacyColor != cfg.Color;
+        for (var i = 0; i < count; i++) changed |= _customPalette[i] != cfg.Colors![i];
+        if (changed)
+        {
+            Array.Clear(_customPalette);
+            for (var i = 0; i < count; i++) _customPalette[i] = cfg.Colors![i];
+            _customPaletteCount = count;
+            _customLegacyColor = cfg.Color;
+            _customColorCursor = 0;
+        }
+        if (count == 0) return cfg.Color;
+        var color = _customPalette[_customColorCursor]!;
+        _customColorCursor = (_customColorCursor + 1) % count;
+        return color;
     }
 
     /// <summary>Blue through cyan, green, yellow and red to white as heat rises over [0, 1].</summary>

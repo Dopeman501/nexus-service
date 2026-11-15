@@ -365,7 +365,7 @@ public class KeyReactiveTests
             }
             else
             {
-                Assert.Equal(255, Red(frame, Led('G')));
+                Assert.Equal(background == KeyReactionCatalog.BackgroundEffect ? 45 : 255, Red(frame, Led('G')));
             }
         }
     }
@@ -418,7 +418,7 @@ public class KeyReactiveTests
 
         // Press and paint read the wall clock separately, so the fade may have started.
         var paint = board.PaintBuffer;
-        Assert.InRange(paint[Led('H') * 3], 200, 255);
+        Assert.InRange(paint[Led('H') * 3], 36, 45);
         Assert.Equal(40, paint[Led('J') * 3 + 1]);
     }
 
