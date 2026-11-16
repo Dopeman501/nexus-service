@@ -124,6 +124,16 @@ public sealed class KeyReactionRenderer
             return;
         }
         var (r, g, b) = PressColor(cfg);
+        if (geo.CoreLayout is not null && cfg.Background == KeyReactionCatalog.BackgroundEffect
+            && effect is KeyReactionCatalog.Fade or KeyReactionCatalog.Ripple
+            && cfg.ColorMode == KeyReactionCatalog.ColorCustom && cfg.Colors is not { Count: > 1 }
+            && r == 0f && g == 0f && b == 0f)
+        {
+            // Wide black masks can cover the board when typing quickly. Replace
+            // the previous pattern without resetting colour progression/state.
+            // Mixed palettes retain their existing simultaneous coloured tails.
+            _active.Clear();
+        }
         if (effect == KeyReactionCatalog.Fade)
         {
             // A held-down repeat or a second tap restarts the key rather than stacking.

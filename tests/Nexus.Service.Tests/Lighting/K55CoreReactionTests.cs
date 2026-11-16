@@ -262,6 +262,33 @@ public sealed class K55CoreReactionTests
         Assert.True(overlay.Apply([frame], null, Environment.TickCount64));
     }
 
+    [Theory]
+    [InlineData("fade")] [InlineData("ripple")]
+    public void Queued_black_presses_replace_only_the_latest_target_cards_reaction(string effect)
+    {
+        var overlay = new KeyReactiveOverlay(); var engine = new LightingEngine { KeyReactive = overlay };
+        var first = Frame();
+        var second = new DeviceFrame(1, "second:card", 10)
+        {
+            DeviceId = "second:device", Archetype = "keyboard", ReactionLayout = first.ReactionLayout,
+        };
+        engine.UpdateDevices([first, second]);
+        var config = Config(effect: effect); config.Color = "#000000";
+        overlay.Set(first, config); overlay.Set(second, config);
+        // Pin the immediate frame; scheduler delays must not advance its peak.
+        var at = Environment.TickCount64;
+        overlay.PressOn(second.Id, key: null, led: 4);
+        overlay.PressOn(first.Id, key: null, led: 0);
+        overlay.PressOn(first.Id, key: null, led: 9);
+        first.Fill(200, 200, 200); second.Fill(200, 200, 200);
+
+        Assert.True(overlay.Apply([first, second], null, at));
+        Assert.Equal(new byte[] { 200, 200, 200 }, first.PaintBuffer[..3]);
+        Assert.Equal(new byte[] { 0, 0, 0 }, first.PaintBuffer[27..30]);
+        Assert.Equal(new byte[] { 0, 0, 0 }, second.PaintBuffer[12..15]);
+        Assert.Equal(new byte[] { 200, 200, 200 }, second.PaintBuffer[..3]);
+    }
+
     [Fact]
     public void Queued_simulated_index_does_not_move_to_a_new_same_card_projection()
     {

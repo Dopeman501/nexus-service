@@ -35,6 +35,87 @@ public sealed class K55BlackNeighbourReactionTests
     private static byte[] Pixel(byte[] frame, int led) => frame[(led * 3)..(led * 3 + 3)];
 
     [Theory]
+    [InlineData("fade", 0.25f, 0.5f)] [InlineData("fade", 1f, 2.5f)] [InlineData("fade", 3f, 3f)]
+    [InlineData("ripple", 0.25f, 0.5f)] [InlineData("ripple", 1f, 2.5f)] [InlineData("ripple", 3f, 3f)]
+    public void Rapid_black_presses_leave_only_the_latest_pattern_and_its_own_duration(string effect, float speed, float size)
+    {
+        var geometry = Core(); var config = Config(effect, speed: speed, size: size);
+        var burst = new KeyReactionRenderer(seed: 1); var latest = new KeyReactionRenderer(seed: 1);
+        // More than the old reaction bound, including repeated keys and distant zones.
+        for (var i = 0; i < 80; i++) burst.Press(geometry, i % 10, config, i * 11);
+        const int finalAt = 880;
+        burst.Press(geometry, 1, config, finalAt);
+        latest.Press(geometry, 1, config, finalAt);
+
+        foreach (var elapsed in new[] { 0, 33, 66, 200, 405, 730, 2000, 6000 })
+            Assert.Equal(Frame(latest, geometry, config, finalAt + elapsed), Frame(burst, geometry, config, finalAt + elapsed));
+        Assert.True(burst.Idle);
+    }
+
+    [Theory]
+    [InlineData("fade")] [InlineData("ripple")]
+    public void A_new_black_press_immediately_releases_the_previous_distant_zone(string effect)
+    {
+        var geometry = Core(); var config = Config(effect, size: 2.5f);
+        var renderer = new KeyReactionRenderer(seed: 1);
+        renderer.Press(geometry, 0, config, 0);
+        renderer.Press(geometry, 9, config, 33);
+
+        var frame = Frame(renderer, geometry, config, 33);
+        Assert.Equal(new byte[] { 200, 200, 200 }, Pixel(frame, 0));
+        Assert.Equal(new byte[] { 0, 0, 0 }, Pixel(frame, 9));
+    }
+
+    [Theory]
+    [InlineData("fade")] [InlineData("ripple")]
+    public void Invalid_or_disabled_presses_do_not_cancel_a_valid_black_reaction(string effect)
+    {
+        var geometry = Core([false, false, false, false, false, false, false, false, false, true]);
+        var config = Config(effect); var renderer = new KeyReactionRenderer(seed: 1);
+        var reference = new KeyReactionRenderer(seed: 1);
+        renderer.Press(geometry, 0, config, 0); reference.Press(geometry, 0, config, 0);
+        foreach (var led in new[] { -1, 10, 9 }) renderer.Press(geometry, led, config, 33);
+
+        Assert.Equal(Frame(reference, geometry, config, 66), Frame(renderer, geometry, config, 66));
+    }
+
+    [Theory]
+    [InlineData("fade")] [InlineData("ripple")]
+    public void An_explicit_black_only_palette_also_replaces_the_previous_reaction(string effect)
+    {
+        var geometry = Core();
+        var config = KeyReactionCatalog.Sanitize(new KeyReaction
+        {
+            Enabled = true, Effect = effect, Background = "effect", ColorMode = "custom",
+            Color = "#000000", Colors = ["#000000"],
+        });
+        var renderer = new KeyReactionRenderer(seed: 1);
+        renderer.Press(geometry, 0, config, 0);
+        renderer.Press(geometry, 9, config, 33);
+        Assert.Equal(new byte[] { 200, 200, 200 }, Pixel(Frame(renderer, geometry, config, 33), 0));
+        Assert.Equal(new byte[] { 0, 0, 0 }, Pixel(Frame(renderer, geometry, config, 33), 9));
+    }
+
+    [Theory]
+    [InlineData("fade", "#000000", "effect", false)] [InlineData("ripple", "#000000", "effect", false)]
+    [InlineData("fade", "#ff0000", "effect", true)] [InlineData("ripple", "#ff0000", "effect", true)]
+    [InlineData("fade", "#010000", "effect", true)] [InlineData("ripple", "#010000", "effect", true)]
+    [InlineData("fade", "#000000", "dim", true)] [InlineData("ripple", "#000000", "dim", true)]
+    [InlineData("fade", "#ff0000", "dark", true)] [InlineData("ripple", "#ff0000", "dark", true)]
+    [InlineData("fade", "#000000", "reveal", true)] [InlineData("ripple", "#000000", "reveal", true)]
+    public void Other_colours_backgrounds_and_keyboards_still_keep_simultaneous_reactions(
+        string effect, string color, string background, bool core)
+    {
+        var geometry = core ? Core() : GenericMapped(Core());
+        var config = Config(effect, color, background);
+        var overlap = new KeyReactionRenderer(seed: 1); var latest = new KeyReactionRenderer(seed: 1);
+        overlap.Press(geometry, 0, config, 0);
+        overlap.Press(geometry, 9, config, 33); latest.Press(geometry, 9, config, 33);
+
+        Assert.NotEqual(Pixel(Frame(latest, geometry, config, 33), 0), Pixel(Frame(overlap, geometry, config, 33), 0));
+    }
+
+    [Theory]
     [InlineData("fade", 0)] [InlineData("fade", 1)] [InlineData("fade", 7)] [InlineData("fade", 9)]
     [InlineData("ripple", 0)] [InlineData("ripple", 1)] [InlineData("ripple", 7)] [InlineData("ripple", 9)]
     public void Black_Over_effect_starts_with_the_pressed_zone_and_its_physical_neighbours_fully_dark(
