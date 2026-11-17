@@ -256,6 +256,7 @@ public static partial class DevicesRoutes
                 AdjustBlue = kv.Value.AdjustBlue,
                 AdjustTemperature = kv.Value.AdjustTemperature,
                 AdjustSaturation = kv.Value.AdjustSaturation,
+                RedShift = kv.Value.RedShift,
                 ColorOrder = kv.Value.ColorOrder,
             };
         }
@@ -806,7 +807,7 @@ public static partial class DevicesRoutes
                     foreach (var (id, pref) in store.Load().Devices.LightingDevicePrefs)
                     {
                         if (pref is null
-                            || (pref.AdjustRed == 1f && pref.AdjustGreen == 1f && pref.AdjustBlue == 1f
+                            || (!pref.RedShift && pref.AdjustRed == 1f && pref.AdjustGreen == 1f && pref.AdjustBlue == 1f
                                 && pref.AdjustTemperature == 0f && pref.AdjustSaturation == 1f
                                 && (Nexus.Service.Lighting.DeviceColorAdjust.NormalizeOrder(pref.ColorOrder) ?? "RGB") == "RGB"))
                         {
@@ -814,6 +815,7 @@ public static partial class DevicesRoutes
                         }
                         dto.Adjustments[id] = new LightingColorAdjustDto
                         {
+                            RedShift = pref.RedShift,
                             Red = pref.AdjustRed,
                             Green = pref.AdjustGreen,
                             Blue = pref.AdjustBlue,
@@ -890,6 +892,7 @@ public static partial class DevicesRoutes
                     if (blue is not null) pref.AdjustBlue = blue.Value;
                     if (temperature is not null) pref.AdjustTemperature = temperature.Value;
                     if (saturation is not null) pref.AdjustSaturation = saturation.Value;
+                    if (body.RedShift is not null) pref.RedShift = body.RedShift.Value;
                     if (colorOrder is not null) pref.ColorOrder = colorOrder == "RGB" ? null : colorOrder;
                 }
             });

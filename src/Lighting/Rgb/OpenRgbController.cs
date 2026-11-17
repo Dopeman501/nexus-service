@@ -31,7 +31,8 @@ public sealed class OpenRgbController : IRgbController, INexusCoolingTransport, 
     private const string ClientName = "nexus";
     private const uint ClientFlags = OpenRgbProtocol.ClientFlagSupportsRgbController
         | OpenRgbProtocol.ClientFlagSupportsSettingsManager
-        | OpenRgbProtocol.ClientFlagRequestLocalClient;
+        | OpenRgbProtocol.ClientFlagRequestLocalClient
+        | OpenRgbProtocol.ClientFlagNonblockingMetadata;
     private const uint MaxPacketSize = 8 * 1024 * 1024;
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(2);
     // A request's reply + ACK. The daemon answers from memory, so missing this means its listen thread is wedged.
@@ -67,6 +68,7 @@ public sealed class OpenRgbController : IRgbController, INexusCoolingTransport, 
         /// <summary>Frames written whose ACK has not arrived yet.</summary>
         public int UnackedFrames;
         public bool LocalClient;
+        public bool NonblockingMetadata;
     }
 
     private sealed class Pending
@@ -171,6 +173,8 @@ public sealed class OpenRgbController : IRgbController, INexusCoolingTransport, 
                     OpenRgbProtocol.BuildClientFlagsBody(ClientFlags), OpenRgbProtocol.PacketId.SetServerFlags, replyOnly: false, ct).ConfigureAwait(false);
                 session.LocalClient = flagsBody is { Length: >= 4 }
                     && (BinaryPrimitives.ReadUInt32LittleEndian(flagsBody) & OpenRgbProtocol.ServerFlagLocalClient) != 0;
+                session.NonblockingMetadata = flagsBody is { Length: >= 4 }
+                    && (BinaryPrimitives.ReadUInt32LittleEndian(flagsBody) & OpenRgbProtocol.ServerFlagNonblockingMetadata) != 0;
                 session.Ready = true;
             }
             catch
@@ -277,8 +281,14 @@ public sealed class OpenRgbController : IRgbController, INexusCoolingTransport, 
             var dataBody = OpenRgbProtocol.BuildRequestControllerDataBody(OpenRgbProtocol.CurrentProtocolVersion);
             for (var i = 0; i < addresses.Count; i++)
             {
-                var (body, _) = await RequestLockedAsync(session, OpenRgbProtocol.PacketId.RequestControllerData, (uint)addresses[i],
+                var (body, status) = await RequestLockedAsync(session, OpenRgbProtocol.PacketId.RequestControllerData, (uint)addresses[i],
                     dataBody, OpenRgbProtocol.PacketId.RequestControllerData, replyOnly: false, ct).ConfigureAwait(false);
+                if (session.NonblockingMetadata && status == OpenRgbProtocol.StatusBusy)
+                {
+                    // A partial list must never replace the bridge's complete graph.
+                    // The ACK completed normally; leave this session and frame traffic intact.
+                    throw new OpenRgbMetadataBusyException(addresses[i], ConnectionGeneration);
+                }
                 if (body is null)
                 {
                     // Removed between the count and this request.

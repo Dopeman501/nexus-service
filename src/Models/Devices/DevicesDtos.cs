@@ -350,6 +350,7 @@ public class SetLightingDeviceColor
 /// all-neutral entry means the device is untouched.</summary>
 public class LightingColorAdjustDto
 {
+    public bool RedShift { get; set; }
     public float Red { get; set; } = 1f;
     public float Green { get; set; } = 1f;
     public float Blue { get; set; } = 1f;
@@ -377,6 +378,8 @@ public class LightingColorAdjustResponse
 public class SetLightingColorAdjustBody
 {
     public List<string> Ids { get; set; } = new();
+    /// <summary>Null preserves the device's independent Red Shift switch.</summary>
+    public bool? RedShift { get; set; }
     public float? Red { get; set; }
     public float? Green { get; set; }
     public float? Blue { get; set; }

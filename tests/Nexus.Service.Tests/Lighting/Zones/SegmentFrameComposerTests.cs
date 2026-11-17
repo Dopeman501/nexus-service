@@ -22,6 +22,7 @@ public class SegmentFrameComposerTests
         var frame = new DeviceFrame(0, id, ledCount);
         for (int i = 0; i < ledCount; i++)
             frame.SetLed(i, (byte)(seed + i), (byte)(i * 2), (byte)(255 - i));
+        frame.Publish();
         return frame;
     }
 
@@ -150,6 +151,36 @@ public class SegmentFrameComposerTests
             Assert.Equal(src[off + 2], buffers[0][i].B);
         }
         Assert.Equal(LegacyFillZone(underglow, KeebLayout.SurroundLedCount, 1.0), buffers[1]);
+    }
+
+    [Theory]
+    [InlineData(false, false, 50, 127)]
+    [InlineData(true, false, 50, 0)]
+    [InlineData(false, true, 50, 0)]
+    [InlineData(false, false, 0, 0)]
+    public void Red_shift_is_per_zone_and_respects_power_and_brightness(bool disabled, bool uncontrolled, int brightness, byte red)
+    {
+        var structure = KeebZoneSupport.BuildStructure(HubId, KeebKeyMap.Ansi);
+        var zones = ZoneResolution.Resolve(structure, new NexusSettings());
+        var keys = Frame(HubId + ":keys", KeebKeyMap.Ansi.LedCount, seed: 0);
+        var underglow = Frame(HubId + ":underglow", KeebLayout.SurroundLedCount, seed: 0);
+        for (var i = 0; i < keys.LedCount; i++) keys.SetLed(i, 255, 116, 220);
+        for (var i = 0; i < underglow.LedCount; i++) underglow.SetLed(i, 255, 116, 220);
+        keys.Publish();
+        underglow.Publish();
+        var pref = System.Text.Json.JsonSerializer.Deserialize(
+            "{\"redShift\":true,\"brightness\":" + brightness + "}",
+            Nexus.Service.Serialization.PersistenceJsonContext.Default.LightingDevicePreference)!;
+        var prefs = new Dictionary<string, LightingDevicePreference> { [keys.Id] = pref };
+        var buffers = Buffers(structure);
+
+        SegmentFrameComposer.Compose(structure, zones, new[] { keys, underglow },
+            disabled ? new List<string> { keys.Id } : new List<string>(),
+            uncontrolled ? new List<string> { keys.Id } : new List<string>(), prefs,
+            new MasterLevel(1f, false), 1.0, DateTime.UtcNow.Ticks, null, buffers);
+
+        Assert.All(buffers[0], c => Assert.Equal(new RgbColor(red, 0, 0), c));
+        Assert.All(buffers[1], c => Assert.Equal(new RgbColor(255, 116, 220), c));
     }
 
     [Fact]

@@ -103,13 +103,21 @@ public class AllocationBudgetTests
 
     // Same loop with a colour-tuning trim applied - the slower branch, and the
     // one that would allocate if DeviceColorAdjust ever stopped being a struct.
-    [Fact]
-    public void Np50FillBufferSlice_WithColorAdjust_IsZeroAlloc()
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Np50FillBufferSlice_WithColorAdjust_IsZeroAlloc(bool redShift)
     {
         const int leds = 120;
         var dst = new RgbColor[leds];
         var src = new byte[leds * 3];
-        var adjust = DeviceColorAdjust.Create(1.2f, 1f, 0.8f, 0.3f, 1.4f);
+        for (var i = 0; i < leds; i++)
+        {
+            src[i * 3] = i % 2 == 0 ? (byte)255 : (byte)0;
+            src[i * 3 + 1] = i % 2 == 0 ? (byte)116 : (byte)255;
+            src[i * 3 + 2] = i % 2 == 0 ? (byte)220 : (byte)0;
+        }
+        var adjust = DeviceColorAdjust.Create(1.2f, 1f, 0.8f, 0.3f, 1.4f, redShift: redShift);
         Assert.False(adjust.IsIdentity);
         Assert.Equal(0, BytesPerIteration(ZeroAllocIterations,
             () => Np50LightingFrameWriter.FillBufferSlice(dst, 0, src, leds, 1.0, adjust, false, 0, 0)));

@@ -36,6 +36,7 @@ public readonly struct DeviceColorAdjust
     private readonly float _g;
     private readonly float _b;
     private readonly float _saturation;
+    private readonly bool _redShift;
     // Index into OrderNames; 0 is RGB (no swizzle).
     private readonly byte _order;
     /// <summary>False for the default-constructed value, which is why the flag
@@ -84,13 +85,14 @@ public readonly struct DeviceColorAdjust
         return 0;
     }
 
-    private DeviceColorAdjust(float r, float g, float b, float saturation, byte order)
+    private DeviceColorAdjust(float r, float g, float b, float saturation, byte order, bool redShift)
     {
         _order = order;
         _r = r;
         _g = g;
         _b = b;
         _saturation = saturation;
+        _redShift = redShift;
         HasEffect = true;
     }
 
@@ -101,7 +103,7 @@ public readonly struct DeviceColorAdjust
     /// trim IS a red/blue balance, and folding it keeps the hot loop to three
     /// multiplies.
     /// </summary>
-    public static DeviceColorAdjust Create(float red, float green, float blue, float temperature, float saturation, string? colorOrder = null)
+    public static DeviceColorAdjust Create(float red, float green, float blue, float temperature, float saturation, string? colorOrder = null, bool redShift = false)
     {
         var order = OrderIndex(colorOrder);
         var r = Math.Clamp(red, MinChannel, MaxChannel);
@@ -111,11 +113,11 @@ public readonly struct DeviceColorAdjust
         var s = Math.Clamp(saturation, MinSaturation, MaxSaturation);
         r *= 1f + TemperatureSpan * t;
         b *= 1f - TemperatureSpan * t;
-        if (r == 1f && g == 1f && b == 1f && s == 1f && order == 0)
+        if (!redShift && r == 1f && g == 1f && b == 1f && s == 1f && order == 0)
         {
             return Identity;
         }
-        return new DeviceColorAdjust(r, g, b, s, order);
+        return new DeviceColorAdjust(r, g, b, s, order, redShift);
     }
 
     /// <summary>
@@ -129,7 +131,7 @@ public readonly struct DeviceColorAdjust
     public static DeviceColorAdjust For(LightingDevicePreference? pref)
     {
         if (pref is null
-            || (pref.AdjustRed == 1f
+            || (!pref.RedShift && pref.AdjustRed == 1f
                 && pref.AdjustGreen == 1f
                 && pref.AdjustBlue == 1f
                 && pref.AdjustTemperature == 0f
@@ -138,7 +140,7 @@ public readonly struct DeviceColorAdjust
         {
             return Identity;
         }
-        return Create(pref.AdjustRed, pref.AdjustGreen, pref.AdjustBlue, pref.AdjustTemperature, pref.AdjustSaturation, pref.ColorOrder);
+        return Create(pref.AdjustRed, pref.AdjustGreen, pref.AdjustBlue, pref.AdjustTemperature, pref.AdjustSaturation, pref.ColorOrder, pref.RedShift);
     }
 
     /// <summary>
@@ -171,6 +173,16 @@ public readonly struct DeviceColorAdjust
         var cr = ToByte(r * _r * m);
         var cg = ToByte(g * _g * m);
         var cb = ToByte(b * _b * m);
+        // Inspect both source identity and the actual tuned logical output.
+        // Brightness can expose gain headroom that a pre-brightness clamp
+        // would hide (white can become pink after dimming unequal gains).
+        // Replacement still obeys brightness, including a zero/off multiplier.
+        if (_redShift && (IsReddish(sr, sg, sb) || IsReddish(cr, cg, cb)))
+        {
+            cr = ToByte(255f * m);
+            cg = 0;
+            cb = 0;
+        }
         switch (_order)
         {
             case 1: or = cr; og = cb; ob = cg; break;
@@ -180,6 +192,18 @@ public readonly struct DeviceColorAdjust
             case 5: or = cb; og = cg; ob = cr; break;
             default: or = cr; og = cg; ob = cb; break;
         }
+    }
+
+    /// <summary>Chromatic hue 270..360 or 0..30 degrees, including faint pinks
+    /// and peach. Achromatic colours (including black) never qualify. The
+    /// sector comparisons avoid division/trigonometry in every LED's hot path.</summary>
+    private static bool IsReddish(float r, float g, float b)
+    {
+        var max = Math.Max(r, Math.Max(g, b));
+        var delta = max - Math.Min(r, Math.Min(g, b));
+        if (delta <= 0f) return false;
+        if (r == max) return g <= b || 2f * (g - b) <= delta;
+        return b == max && 2f * (r - g) >= delta;
     }
 
     /// <summary>

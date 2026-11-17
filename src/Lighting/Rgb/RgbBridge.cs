@@ -143,6 +143,7 @@ public sealed class RgbBridge : IDisposable
     private TaskCompletionSource _listCommitted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _refreshPending;           // 0 = idle, 1 = refresh scheduled/running
     private readonly SemaphoreSlim _refreshSemaphore = new(1, 1);
+    private readonly OpenRgbMetadataRetry _metadataRetry = new(); // Guarded by _lock; no retry timer or task.
     private Dictionary<string, int>? _lastUsbKeys; // key -> unit count; null = not yet observed, no bounce on first read
     // Settled-list contents already written to the log, so the refresh poll re-logs
     // only shapes not seen yet. A set rather than the last value: a device that
@@ -509,6 +510,7 @@ public sealed class RgbBridge : IDisposable
             }
 
             _active = false;
+            _metadataRetry.Reset();
             frameHandler = _frameHandler;
             _frameHandler = null;
             deviceListHandler = _deviceListHandler;
@@ -1220,6 +1222,7 @@ public sealed class RgbBridge : IDisposable
             lock (_lock)
             {
                 _committedAddresses = Array.Empty<int>();
+                _metadataRetry.Reset();
             }
             bool connected;
             try
@@ -1302,10 +1305,17 @@ public sealed class RgbBridge : IDisposable
             }
 
             IReadOnlyList<RgbDevice> devices;
+            long metadataScope;
+            lock (_lock) { metadataScope = _metadataRetry.Scope; }
             try
             {
                 devices = await _controller.GetDevicesAsync().ConfigureAwait(false);
                 PinFallbackIds(devices);
+            }
+            catch (OpenRgbMetadataBusyException busy)
+            {
+                DeferMetadataRefresh(metadataScope, busy.ConnectionGeneration);
+                return;
             }
             catch (Exception ex)
             {
@@ -1313,7 +1323,6 @@ public sealed class RgbBridge : IDisposable
                 RecordDaemonFailure("refresh", ex.Message);
                 return;
             }
-            Interlocked.Exchange(ref _daemonFailures, 0);
 
             // Apply any queued or persisted motherboard zone resizes BEFORE the
             // device list becomes the engine's source of truth. Re-fetch the
@@ -1328,6 +1337,11 @@ public sealed class RgbBridge : IDisposable
                     devices = await _controller.GetDevicesAsync().ConfigureAwait(false);
                     PinFallbackIds(devices);
                     refetched = true;
+                }
+                catch (OpenRgbMetadataBusyException busy)
+                {
+                    DeferMetadataRefresh(metadataScope, busy.ConnectionGeneration);
+                    return;
                 }
                 catch (Exception ex)
                 {
@@ -1610,6 +1624,8 @@ public sealed class RgbBridge : IDisposable
             // length. OnFrame writes each zone's slice into the corresponding offset
             // and then pushes once per physical device.
             SyncPhysicalBuffers(devices);
+            lock (_lock) { _metadataRetry.Complete(metadataScope); }
+            Interlocked.Exchange(ref _daemonFailures, 0);
         }
         finally
         {
@@ -2419,11 +2435,23 @@ public sealed class RgbBridge : IDisposable
         bool changed;
         lock (_lock)
         {
-            changed = !SameAddresses(addresses, _committedAddresses);
+            changed = _metadataRetry.NeedsRetry(MetadataConnectionGeneration)
+                || !SameAddresses(addresses, _committedAddresses);
         }
         if (changed)
         {
             await RefreshDevicesAsync().ConfigureAwait(false);
+        }
+    }
+
+    private int MetadataConnectionGeneration =>
+        (_controller as IOpenRgbWriteHealthTransport)?.ConnectionGeneration ?? 0;
+
+    private void DeferMetadataRefresh(long scope, int generation)
+    {
+        lock (_lock)
+        {
+            if (_active) _metadataRetry.Defer(scope, generation, MetadataConnectionGeneration);
         }
     }
 

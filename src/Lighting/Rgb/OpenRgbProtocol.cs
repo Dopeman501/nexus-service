@@ -28,12 +28,15 @@ public static class OpenRgbProtocol
     public const uint ClientFlagSupportsSettingsManager = 1u << 4;
     public const uint ClientFlagRequestLocalClient = 1u << 16;
     public const uint ServerFlagLocalClient = 1u << 16;
+    public const uint ClientFlagNonblockingMetadata = 1u << 17;
+    public const uint ServerFlagNonblockingMetadata = 1u << 17;
 
     /// <summary>ACK status codes (NetPacketStatus).</summary>
     public const uint StatusOk = 0;
     public const uint StatusUnsupported = 2;
     public const uint StatusInvalidId = 4;
     public const uint StatusInvalidData = 5;
+    public const uint StatusBusy = 6;
     public static readonly byte[] MagicBytes = new byte[] { 0x4F, 0x52, 0x47, 0x42 }; // "ORGB"
 
     public enum PacketId : uint
