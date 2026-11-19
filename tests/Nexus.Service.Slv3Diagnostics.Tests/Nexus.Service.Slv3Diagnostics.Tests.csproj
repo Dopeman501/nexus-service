@@ -1,0 +1,41 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <DefineConstants>$(DefineConstants);WINDOWS;SLV3_FAKE_NATIVE</DefineConstants>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <IsPackable>false</IsPackable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+  </PropertyGroup>
+  <ItemGroup>
+    <FrameworkReference Include="Microsoft.AspNetCore.App" />
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageReference Include="coverlet.collector" Version="6.0.4" />
+    <Using Include="Xunit" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3Transport.cs" Link="Owners/Slv3Transport.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3TransportDiagnostics.cs" Link="Owners/Slv3TransportDiagnostics.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3GetDevDiagnostics.cs" Link="Owners/Slv3GetDevDiagnostics.cs" />
+    <Compile Include="../../src/Diagnostics/EfficiencyDiagnosticOptions.cs" Link="Owners/EfficiencyDiagnosticOptions.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3Protocol.cs" Link="Owners/Slv3Protocol.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3FlexLcd.cs" Link="Owners/Slv3FlexLcd.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3Hub.cs" Link="Owners/Slv3Hub.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3DeviceListObservation.cs" Link="Owners/Slv3DeviceListObservation.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3Hub.FlexLcd.cs" Link="Owners/Slv3Hub.FlexLcd.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3State.cs" Link="Owners/Slv3State.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3RgbFrame.cs" Link="Owners/Slv3RgbFrame.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/TinyUz.cs" Link="Owners/TinyUz.cs" />
+    <Compile Include="../../src/Peripherals/LianLiWireless/Slv3TxPortCycler.cs" Link="Owners/Slv3TxPortCycler.cs" />
+    <Compile Include="../../src/Lighting/LcdLockState.cs" Link="Owners/LcdLockState.cs" />
+    <Compile Include="../Nexus.Service.Tests/LianLiWireless/Slv3TestHub.cs" Link="Fixtures/Slv3TestHub.cs" />
+    <Compile Include="../Nexus.Service.Tests/LianLiWireless/Slv3DiagnosticBoundaryTests.cs" Link="Tests/Slv3DiagnosticBoundaryTests.cs" />
+    <Compile Include="../Nexus.Service.Tests/LianLiWireless/Slv3GetDevDiagnosticsTests.cs" Link="Tests/Slv3GetDevDiagnosticsTests.cs" />
+    <Compile Include="../Nexus.Service.Tests/LianLiWireless/Slv3DiagnosticPreservationTests.cs" Link="Tests/Slv3DiagnosticPreservationTests.cs" />
+    <Compile Include="../Nexus.Service.Tests/LianLiWireless/Slv3HealthExpiryTests.cs" Link="Tests/Slv3HealthExpiryTests.cs" />
+    <Compile Include="../Nexus.Service.Tests/LianLiWireless/Slv3DeviceListObservationTests.cs" Link="Tests/Slv3DeviceListObservationTests.cs" />
+    <Compile Include="../Nexus.Service.Tests/LianLiWireless/Slv3ProtocolTests.cs" Link="Preservation/Slv3ProtocolTests.cs" />
+    <Compile Include="FakeBoundary.cs" />
+  </ItemGroup>
+</Project>

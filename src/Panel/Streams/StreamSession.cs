@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Threading;
+using System.Diagnostics;
+using Nexus.Service.Diagnostics;
 using Nexus.Service.Platform;
 
 namespace Nexus.Service.Panel.Streams;
@@ -38,9 +40,22 @@ public sealed class StreamSession
     private long _lastIngestTicks;
     private long _bindGeneration;
     private IDisposable? _section;
+    private readonly StreamStageDiagnostics? _explicitDiagnostics;
+    private readonly DiagnosticLeaseOwner<StreamStageDiagnostics> _diagnosticOwner = new();
+    private readonly Func<StreamStageDiagnostics> _diagnosticFactory;
+    private readonly bool _runtimeDiagnostics;
+    internal StreamStageDiagnostics? Diagnostics => _runtimeDiagnostics ? _diagnosticOwner.Get(_diagnosticFactory) : _explicitDiagnostics;
 
     public StreamSession(string sessionId, StreamedPanelDeviceInfo info, string panelDeviceId)
+        : this(sessionId, info, panelDeviceId, null)
     {
+        _runtimeDiagnostics = true;
+    }
+
+    internal StreamSession(string sessionId, StreamedPanelDeviceInfo info, string panelDeviceId, StreamStageDiagnostics? diagnostics)
+    {
+        _explicitDiagnostics = diagnostics;
+        _diagnosticFactory = () => new StreamStageDiagnostics(sessionId, Stopwatch.Frequency, Stopwatch.GetTimestamp());
         SessionId = sessionId;
         Info = info;
         PanelDeviceId = panelDeviceId;
@@ -137,6 +152,7 @@ public sealed class StreamSession
             var length = frame.Length < 0 ? frame.Payload.Length : frame.Length;
             if (length != required || length > frame.Payload.Length)
             {
+                Diagnostics?.RejectedRaw();
                 frame.Release();
                 if (Interlocked.Exchange(ref _loggedRawFrameSize, 1) == 0)
                     ServiceLog.Warn($"[streamed-panel] session={SessionId} invalid raw frame length {length}, expected {required}");
@@ -145,6 +161,7 @@ public sealed class StreamSession
         }
 
         var now = System.Diagnostics.Stopwatch.GetTimestamp();
+        Diagnostics?.Accepted(now, frame.Length < 0 ? frame.Payload.Length : frame.Length);
         var last = Interlocked.Exchange(ref _lastIngestTicks, now);
         if (last != 0)
             RecordIngestGap((now - last) * 1000 / System.Diagnostics.Stopwatch.Frequency);
@@ -162,6 +179,7 @@ public sealed class StreamSession
             _queue.Enqueue(frame);
             if (_queue.Count > _maxQueuedFrames)
                 TrimToNewestIdrLocked();
+            Diagnostics?.Enqueued(_queue.Count);
         }
     }
 
@@ -178,12 +196,14 @@ public sealed class StreamSession
                 Info.Profile.EffectiveWriteBatchFrames);
             for (var i = 0; i < decision.DropCount; i++) _queue.Dequeue().Release();
             _dropped += decision.DropCount;
+            Diagnostics?.Dropped(trimmed: 0, resync: decision.DropCount, cleared: 0);
             if (decision.ClearWaitingForIdr) _waitingForIdr = false;
             if (decision.SendCount == 0) return Array.Empty<StreamFrame>();
             var send = new List<StreamFrame>(decision.SendCount);
             for (var i = 0; i < decision.SendCount && _queue.Count > 0; i++)
                 send.Add(_queue.Dequeue());
             _sent += send.Count;
+            Diagnostics?.Dequeued(send.Count);
             return send;
         }
     }
@@ -204,10 +224,12 @@ public sealed class StreamSession
         {
             _bindGeneration++;
             _dropped += _queue.Count;
+            Diagnostics?.Dropped(trimmed: 0, resync: _queue.Count, cleared: 0);
             ClearLocked();
             _waitingForIdr = true;
             _ingestBound = true;
             _lastIngestTicks = 0;
+            Diagnostics?.ResetIngestClock();
             return _bindGeneration;
         }
     }
@@ -228,6 +250,7 @@ public sealed class StreamSession
         lock (_lock)
         {
             _closed = true;
+            Diagnostics?.Dropped(trimmed: 0, resync: 0, cleared: _queue.Count);
             ClearLocked();
             section = _section;
             _section = null;
@@ -245,6 +268,17 @@ public sealed class StreamSession
     internal int QueueDepthForTest
     {
         get { lock (_lock) return _queue.Count; }
+    }
+
+    internal void ReportDiagnostics(bool final = false)
+    {
+        var epoch = EfficiencyDiagnosticOptions.SessionRevision;
+        if (Diagnostics is not { } diagnostics) return;
+        var profile = Info.Profile;
+        if (diagnostics.Report(Stopwatch.GetTimestamp(), QueueDepthForTest, _maxQueuedFrames,
+            profile.Codec, StreamedPanelProfile.FramePixels(profile.CssWidth, profile.Dpr),
+            StreamedPanelProfile.FramePixels(profile.CssHeight, profile.Dpr), profile.Fps, final) is { } line)
+            if (!_runtimeDiagnostics || (epoch != 0 && epoch == EfficiencyDiagnosticOptions.SessionRevision)) ServiceLog.Info(line);
     }
 
     /// <summary>The ingest reader reports each inter-frame arrival gap;
@@ -301,11 +335,13 @@ public sealed class StreamSession
         if (newestIdr < 0 || frames.Length - newestIdr > _maxQueuedFrames)
         {
             _dropped += frames.Length;
+            Diagnostics?.Dropped(trimmed: frames.Length, resync: 0, cleared: 0);
             _waitingForIdr = true;
             foreach (var frame in frames) frame.Release();
             return;
         }
         _dropped += newestIdr;
+        Diagnostics?.Dropped(trimmed: newestIdr, resync: 0, cleared: 0);
         for (var i = 0; i < newestIdr; i++) frames[i].Release();
         for (var i = newestIdr; i < frames.Length; i++)
             _queue.Enqueue(frames[i]);

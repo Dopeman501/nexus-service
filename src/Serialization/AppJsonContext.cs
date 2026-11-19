@@ -27,6 +27,10 @@ using Nexus.Service.Update;
 
 namespace Nexus.Service.Serialization;
 
+[JsonSerializable(typeof(Nexus.Service.Diagnostics.EfficiencyLeaseProjection))]
+[JsonSerializable(typeof(Nexus.Service.Diagnostics.EfficiencyLeaseRequest))]
+[JsonSerializable(typeof(Nexus.Service.Diagnostics.EfficiencyLeaseAck))]
+
 // Ping + Auth
 [JsonSerializable(typeof(ApiResponse))]
 [JsonSerializable(typeof(Nexus.Service.Platform.OpenAppBody))]

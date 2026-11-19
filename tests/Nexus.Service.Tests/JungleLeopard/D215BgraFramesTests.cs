@@ -2,11 +2,27 @@ using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
 using Nexus.Service.Peripherals.JungleLeopard;
+using Xunit.Abstractions;
 
 namespace Nexus.Service.Tests.JungleLeopard;
 
-public sealed class D215BgraFramesTests
+public sealed class D215BgraFramesTests(ITestOutputHelper output)
 {
+    [Theory]
+    [InlineData(32 * 1024)]
+    [InlineData(100 * 1024)]
+    [InlineData(305 * 1024)]
+    public void Warm_fresh_frame_assembly_does_not_allocate_payload_sized_envelopes(int payloadBytes)
+    {
+        using var frames = new D215BgraFrames(2, _ => new FixedEncoder(new byte[payloadBytes]));
+        for (var i = 0; i < 8; i++) { frames.Queue([1, 2]); using var lease = frames.TakeLatestEnvelope(); }
+        var before = GC.GetAllocatedBytesForCurrentThread();
+        for (var i = 0; i < 100; i++) { frames.Queue([1, 2]); using var lease = frames.TakeLatestEnvelope(); }
+        var allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+        output.WriteLine($"fresh-envelope payload={payloadBytes}; samples=100; allocated={allocated} bytes; pool=624652 bytes");
+        Assert.True(allocated < 4096, $"Fresh-envelope assembly allocated {allocated} bytes for {payloadBytes}-byte payloads.");
+    }
+
     [Fact]
     public void A_failed_still_rotation_retries_the_canonical_frame_without_new_input()
     {
@@ -18,14 +34,14 @@ public sealed class D215BgraFramesTests
         frame[0] = 1;
         frame[^4] = 2;
         frames.Queue(frame);
-        Assert.Equal(1, frames.TakeLatestEnvelope().Span[4]);
+        Assert.Equal(1, frames.TakeEnvelopeSnapshot().Span[4]);
 
         flip180 = reject = true;
-        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.True(frames.TakeEnvelopeSnapshot().IsEmpty);
         reject = false;
 
-        Assert.Equal(2, frames.TakeLatestEnvelope().Span[4]);
-        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.Equal(2, frames.TakeEnvelopeSnapshot().Span[4]);
+        Assert.True(frames.TakeEnvelopeSnapshot().IsEmpty);
         Assert.Equal(1, frames.DroppedFrames);
     }
 
@@ -34,15 +50,15 @@ public sealed class D215BgraFramesTests
     {
         using var frames = new D215BgraFrames(4, _ => new EchoEncoder());
         frames.Queue([1, 2]);
-        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.True(frames.TakeEnvelopeSnapshot().IsEmpty);
 
         frames.Queue([3, 4, 5, 6, 7, 8, 9, 10]);
-        Assert.Equal(new byte[] { 4, 0, 0, 0, 5, 6, 7, 8, 30, 0 }, frames.TakeLatestEnvelope().ToArray());
+        Assert.Equal(new byte[] { 4, 0, 0, 0, 5, 6, 7, 8, 30, 0 }, frames.TakeEnvelopeSnapshot().ToArray());
         Assert.Equal(1, frames.DroppedFrames);
-        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.True(frames.TakeEnvelopeSnapshot().IsEmpty);
 
         frames.Queue([11, 12]);
-        Assert.Equal(new byte[] { 4, 0, 0, 0, 9, 10, 11, 12, 46, 0 }, frames.TakeLatestEnvelope().ToArray());
+        Assert.Equal(new byte[] { 4, 0, 0, 0, 9, 10, 11, 12, 46, 0 }, frames.TakeEnvelopeSnapshot().ToArray());
     }
 
     [Fact]
@@ -52,7 +68,7 @@ public sealed class D215BgraFramesTests
         frames.Queue([1, 2]);
         frames.Queue([3, 4, 5, 6, 7, 8]);
 
-        Assert.Equal(new byte[] { 2, 0, 0, 0, 7, 8, 17, 0 }, frames.TakeLatestEnvelope().ToArray());
+        Assert.Equal(new byte[] { 2, 0, 0, 0, 7, 8, 17, 0 }, frames.TakeEnvelopeSnapshot().ToArray());
         Assert.Equal(3, frames.DroppedFrames);
     }
 
@@ -62,7 +78,7 @@ public sealed class D215BgraFramesTests
         using var encoder = new BlockingEncoder();
         using var frames = new D215BgraFrames(2, _ => encoder);
         frames.Queue([1, 2]);
-        var active = Task.Run(() => frames.TakeLatestEnvelope());
+        var active = Task.Run(() => frames.TakeEnvelopeSnapshot());
         try
         {
             await encoder.Started.Task.WaitAsync(TimeSpan.FromSeconds(3));
@@ -75,7 +91,7 @@ public sealed class D215BgraFramesTests
 
         var first = await active.WaitAsync(TimeSpan.FromSeconds(3));
         Assert.Equal(new byte[] { 2, 0, 0, 0, 1, 2, 5, 0 }, first.ToArray());
-        Assert.Equal(new byte[] { 2, 0, 0, 0, 5, 6, 13, 0 }, frames.TakeLatestEnvelope().ToArray());
+        Assert.Equal(new byte[] { 2, 0, 0, 0, 5, 6, 13, 0 }, frames.TakeEnvelopeSnapshot().ToArray());
         Assert.Equal(1, frames.DroppedFrames);
     }
 
@@ -84,11 +100,33 @@ public sealed class D215BgraFramesTests
     {
         using var frames = new D215BgraFrames(2, _ => new EchoEncoder());
         frames.Queue([1, 2]);
-        var first = frames.TakeLatestEnvelope();
+        using var first = frames.TakeLatestEnvelope();
 
         frames.Queue([3, 4]);
-        Assert.Equal(new byte[] { 2, 0, 0, 0, 3, 4, 9, 0 }, frames.TakeLatestEnvelope().ToArray());
-        Assert.Equal(new byte[] { 2, 0, 0, 0, 1, 2, 5, 0 }, first.ToArray());
+        using var second = frames.TakeLatestEnvelope();
+        Assert.Equal(new byte[] { 2, 0, 0, 0, 3, 4, 9, 0 }, second.Memory.ToArray());
+        Assert.Equal(new byte[] { 2, 0, 0, 0, 1, 2, 5, 0 }, first.Memory.ToArray());
+    }
+
+    [Fact]
+    public void Exhausted_envelope_slots_keep_the_pending_frame_until_a_lease_really_returns()
+    {
+        using var frames = new D215BgraFrames(2, _ => new EchoEncoder());
+        frames.Queue([1, 2]);
+        using var first = frames.TakeLatestEnvelope();
+        frames.Queue([3, 4]);
+        using var second = frames.TakeLatestEnvelope();
+        frames.Queue([5, 6]);
+        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.Equal(new byte[] { 2, 0, 0, 0, 1, 2, 5, 0 }, first.Memory.ToArray());
+        first.Dispose();
+        using var third = frames.TakeLatestEnvelope();
+        Assert.Equal(new byte[] { 2, 0, 0, 0, 5, 6, 13, 0 }, third.Memory.ToArray());
+        Assert.Equal(new byte[] { 2, 0, 0, 0, 3, 4, 9, 0 }, second.Memory.ToArray());
+        first.Dispose();
+        frames.Queue([7, 8]);
+        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.Equal(0, frames.DroppedFrames);
     }
 
     [Fact]
@@ -102,7 +140,7 @@ public sealed class D215BgraFramesTests
         });
 
         frames.Queue([1, 2]);
-        Assert.Equal(new byte[] { 2, 0, 0, 0, 1, 2, 5, 0 }, frames.TakeLatestEnvelope().ToArray());
+        Assert.Equal(new byte[] { 2, 0, 0, 0, 1, 2, 5, 0 }, frames.TakeEnvelopeSnapshot().ToArray());
         Assert.Equal(new[] { 85, 70 }, qualities);
         Assert.Equal(0, frames.DroppedFrames);
     }
@@ -119,13 +157,13 @@ public sealed class D215BgraFramesTests
         });
 
         frames.Queue([1, 2]);
-        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.True(frames.TakeEnvelopeSnapshot().IsEmpty);
         Assert.Equal(1, frames.DroppedFrames);
         Assert.Equal(3, encoders.Count);
 
         encoders[0].Bytes = [1, 2];
         frames.Queue([3, 4]);
-        Assert.False(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.False(frames.TakeEnvelopeSnapshot().IsEmpty);
         frames.Dispose();
         frames.Dispose();
         Assert.All(encoders, encoder => Assert.Equal(1, encoder.Disposals));

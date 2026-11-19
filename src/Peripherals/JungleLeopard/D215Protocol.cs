@@ -20,6 +20,7 @@ internal static class D215Protocol
     private const int JpegLengthBytes = sizeof(uint);
     // The vendor profile supplies this provisional rejection ceiling.
     internal const int MaximumJpegBytes = 305 * 1024;
+    internal const int MaximumJpegEnvelopeBytes = MaximumJpegBytes + JpegLengthBytes + ChecksumBytes;
 
     internal static ReadOnlySpan<byte> ControlSync => [HeaderFirst, HeaderSecond];
 
@@ -39,14 +40,28 @@ internal static class D215Protocol
 
     internal static byte[] BuildJpegEnvelope(ReadOnlySpan<byte> jpeg)
     {
+        ValidateJpeg(jpeg);
+        var envelope = new byte[JpegLengthBytes + jpeg.Length + ChecksumBytes];
+        WriteJpegEnvelope(jpeg, envelope);
+        return envelope;
+    }
+
+    internal static int WriteJpegEnvelope(ReadOnlySpan<byte> jpeg, Span<byte> destination)
+    {
+        ValidateJpeg(jpeg);
+        var length = JpegLengthBytes + jpeg.Length + ChecksumBytes;
+        if (destination.Length < length) throw new ArgumentException("The destination is too small for the JPEG envelope.", nameof(destination));
+        var envelope = destination[..length];
+        BinaryPrimitives.WriteUInt32LittleEndian(envelope, (uint)jpeg.Length);
+        jpeg.CopyTo(envelope[JpegLengthBytes..]);
+        WriteChecksum(envelope);
+        return length;
+    }
+
+    private static void ValidateJpeg(ReadOnlySpan<byte> jpeg)
+    {
         if (jpeg.IsEmpty || jpeg.Length > MaximumJpegBytes)
             throw new ArgumentOutOfRangeException(nameof(jpeg), "The JPEG payload must be between 1 byte and 305 KiB.");
-
-        var envelope = new byte[JpegLengthBytes + jpeg.Length + ChecksumBytes];
-        BinaryPrimitives.WriteUInt32LittleEndian(envelope, (uint)jpeg.Length);
-        jpeg.CopyTo(envelope.AsSpan(JpegLengthBytes));
-        WriteChecksum(envelope);
-        return envelope;
     }
 
     internal static bool TryReadControlFrame(ReadOnlySpan<byte> frame, out byte command, out ReadOnlySpan<byte> payload)

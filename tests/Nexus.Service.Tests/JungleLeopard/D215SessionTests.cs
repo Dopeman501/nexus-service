@@ -565,7 +565,7 @@ public sealed class D215SessionTests
     {
         private byte[]? _envelope = Convert.FromHexString(JpegEnvelope);
         public bool MayRepeat => false;
-        public ReadOnlyMemory<byte> TakeLatestEnvelope() => Interlocked.Exchange(ref _envelope, null);
+        public D215EnvelopeLease TakeLatestEnvelope() => D215EnvelopeLease.FromOwned(Interlocked.Exchange(ref _envelope, null));
     }
 
     private sealed class FakeWire(params byte[][] chunks) : ID215SerialTransport

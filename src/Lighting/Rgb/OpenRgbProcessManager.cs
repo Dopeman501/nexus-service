@@ -44,6 +44,10 @@ public sealed class OpenRgbProcessManager : IDisposable
     private CancellationTokenSource? _supervisorCts;
     private bool _disposed;
 
+    // Instance-scoped so actual-owner tests can never read or rewrite the live daemon config.
+    internal Func<string> ConfigDirectoryResolver { get; init; } = ResolveConfigDir;
+    internal string ConfigDirectory => ConfigDirectoryResolver();
+
     public OpenRgbProcessManager(string? overrideExePath = null, Nexus.Service.Persistence.IConfigStore? store = null,
         Nexus.Service.Devices.DeviceControlGate? gate = null)
     {
@@ -310,7 +314,7 @@ public sealed class OpenRgbProcessManager : IDisposable
     /// </summary>
     internal string? RefreshDetectorOverrides()
     {
-        var configDir = ResolveConfigDir();
+        var configDir = ConfigDirectory;
         var native = ResolveNativeDisabledDetectors();
         EnsureDetectorOverrides(configDir, ResolvePlaceholderDetectors(), ResolveBusDisabledDetectors(), native);
         Volatile.Write(ref _appliedNativeSignature, SignatureOf(native));
@@ -632,7 +636,7 @@ public sealed class OpenRgbProcessManager : IDisposable
 
             // Use a service-owned config directory so we don't collide with any
             // user-installed OpenRGB. Lives under %ProgramData%\Nexus on Windows.
-            var configDir = ResolveConfigDir();
+            var configDir = ConfigDirectory;
             try
             { Directory.CreateDirectory(configDir); }
             catch { /* will fail loudly when OpenRGB itself tries */ }

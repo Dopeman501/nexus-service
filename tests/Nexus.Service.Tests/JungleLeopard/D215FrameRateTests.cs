@@ -130,10 +130,10 @@ public sealed class D215FrameRateTests
     private sealed class FreshFrames(ManualClock clock, TimeSpan encode) : ID215FrameSource
     {
         public bool MayRepeat => true;
-        public ReadOnlyMemory<byte> TakeLatestEnvelope()
+        public D215EnvelopeLease TakeLatestEnvelope()
         {
             clock.Advance(encode);
-            return new byte[] { 4, 0, 0, 0, 0xFF, 0xD8, 0xFF, 0xD9, 0xB3, 3 };
+            return D215EnvelopeLease.FromOwned(new byte[] { 4, 0, 0, 0, 0xFF, 0xD8, 0xFF, 0xD9, 0xB3, 3 });
         }
     }
 

@@ -59,7 +59,8 @@ public sealed class D215FrameRateBenchmarkTests(ITestOutputHelper output)
             for (var warmup = 0; warmup < 5; warmup++)
             {
                 frames.Queue(frame);
-                Assert.False(frames.TakeLatestEnvelope().IsEmpty);
+                using var envelope = frames.TakeLatestEnvelope();
+                Assert.False(envelope.IsEmpty);
             }
 
             const int count = 60;
@@ -72,7 +73,7 @@ public sealed class D215FrameRateBenchmarkTests(ITestOutputHelper output)
                 frame[0] = (byte)index;
                 var started = Stopwatch.GetTimestamp();
                 frames.Queue(frame);
-                var envelope = frames.TakeLatestEnvelope();
+                using var envelope = frames.TakeLatestEnvelope();
                 durations[index] = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                 bytes += envelope.Length;
                 Assert.False(envelope.IsEmpty);
@@ -110,7 +111,7 @@ public sealed class D215FrameRateBenchmarkTests(ITestOutputHelper output)
     {
         private byte[]? _frame = Convert.FromHexString("04000000FFD8FFD9B303");
         public bool MayRepeat => true;
-        public ReadOnlyMemory<byte> TakeLatestEnvelope() => Interlocked.Exchange(ref _frame, null) ?? ReadOnlyMemory<byte>.Empty;
+        public D215EnvelopeLease TakeLatestEnvelope() => D215EnvelopeLease.FromOwned(Interlocked.Exchange(ref _frame, null));
     }
 
     private sealed class TimingWire : ID215SerialTransport

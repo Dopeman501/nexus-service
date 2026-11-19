@@ -178,7 +178,7 @@ public sealed class D215RestartTests
     private sealed class NoFrames : ID215FrameSource
     {
         public bool MayRepeat => false;
-        public ReadOnlyMemory<byte> TakeLatestEnvelope() => default;
+        public D215EnvelopeLease TakeLatestEnvelope() => default;
     }
 
     private sealed class Harness : IAsyncDisposable

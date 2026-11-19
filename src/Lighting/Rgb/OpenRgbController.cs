@@ -26,7 +26,7 @@ namespace Nexus.Service.Lighting.Rgb;
 ///
 /// AOT: pure System.Net.Sockets + ArrayPool, zero reflection.
 /// </summary>
-public sealed class OpenRgbController : IRgbController, INexusCoolingTransport, IOpenRgbWriteHealthTransport
+public sealed partial class OpenRgbController : IRgbController, INexusCoolingTransport, IOpenRgbWriteHealthTransport, IOpenRgbRefreshTransport
 {
     private const string ClientName = "nexus";
     private const uint ClientFlags = OpenRgbProtocol.ClientFlagSupportsRgbController
@@ -146,8 +146,11 @@ public sealed class OpenRgbController : IRgbController, INexusCoolingTransport, 
             }
 
             var session = new Session { Tcp = tcp, Stream = stream };
-            Volatile.Write(ref _session, session);
-            Interlocked.Increment(ref _connectionGeneration);
+            lock (_connectionPublicationGate)
+            {
+                Volatile.Write(ref _session, session);
+                Interlocked.Increment(ref _connectionGeneration);
+            }
             _ = Task.Run(() => ReadLoopAsync(session));
 
             try
@@ -837,12 +840,12 @@ public sealed class OpenRgbController : IRgbController, INexusCoolingTransport, 
         {
             return;
         }
-        Interlocked.CompareExchange(ref _session, null, session);
-        if (session.Closed)
+        lock (_connectionPublicationGate)
         {
-            return;
+            Interlocked.CompareExchange(ref _session, null, session);
+            if (session.Closed) return;
+            session.Closed = true;
         }
-        session.Closed = true;
         if (session.Pending is { } pending && pending.Done.TrySetException(new IOException("OpenRGB connection closed")))
         {
             // The requester may have already left (send failure, cancel); a faulted

@@ -227,7 +227,7 @@ public sealed class WindowsD215SerialCancellationTests
 
     private sealed class PipeFrameSource(byte[] envelope) : ID215FrameSource
     {
-        public ReadOnlyMemory<byte> TakeLatestEnvelope() => envelope;
+        public D215EnvelopeLease TakeLatestEnvelope() => D215EnvelopeLease.FromOwned(envelope);
         public bool MayRepeat => false;
     }
 

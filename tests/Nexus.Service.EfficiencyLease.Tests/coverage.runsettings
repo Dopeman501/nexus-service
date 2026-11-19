@@ -1,0 +1,5 @@
+<RunSettings><DataCollectionRunSettings><DataCollectors><DataCollector friendlyName="XPlat Code Coverage"><Configuration>
+  <Format>cobertura</Format><IncludeTestAssembly>true</IncludeTestAssembly>
+  <Include>[Nexus.Service.EfficiencyLease.Tests]Nexus.Service.Diagnostics.*,[Nexus.Service.EfficiencyLease.Tests]Nexus.Overlay.*</Include>
+  <ExcludeByAttribute>GeneratedCodeAttribute,CompilerGeneratedAttribute</ExcludeByAttribute>
+</Configuration></DataCollector></DataCollectors></DataCollectionRunSettings></RunSettings>

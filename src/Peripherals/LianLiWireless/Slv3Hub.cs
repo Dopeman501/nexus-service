@@ -29,6 +29,14 @@ public sealed partial class Slv3Hub : IDisposable
     private readonly ISlv3Discovery _discovery;
     private readonly Func<Slv3PortInfo, ISlv3Transport> _transportFactory;
     private readonly object _lock = new();
+    private readonly Nexus.Service.Diagnostics.DiagnosticLeaseOwner<Slv3GetDevDiagnostics> _getDevOwner = new();
+    private bool _getDevOverrideSet;
+    private Slv3GetDevDiagnostics? _getDevOverride;
+    internal Slv3GetDevDiagnostics? GetDevDiagnostics
+    {
+        get => _getDevOverrideSet ? _getDevOverride : _getDevOwner.Get(static () => new());
+        init { _getDevOverride = value; _getDevOverrideSet = true; }
+    }
     private readonly Dictionary<string, Slv3PendingCommand> _pendingCommands = new(StringComparer.Ordinal);
     private readonly Dictionary<string, DeferredUnbind> _deferredUnbinds = new(StringComparer.Ordinal);
     // Last cmd_seq issued per chain MAC hex, so back-to-back commands stay
@@ -50,6 +58,8 @@ public sealed partial class Slv3Hub : IDisposable
     // listed only once enough polls within the confirm window repeat it.
     private readonly Dictionary<string, Slv3Unconfirmed> _unconfirmedChains = new(StringComparer.Ordinal);
     private long _devicePolls;
+    // Absence of a master can age only on a complete structurally validated list.
+    private long _completeDevicePolls;
     internal const int ChainConfirmWindowPolls = 10;
     internal const int ChainConfirmSightings = 3;
 
@@ -228,6 +238,7 @@ public sealed partial class Slv3Hub : IDisposable
     // Unseen this long = telemetry is last-known, surfaced as Stale.
     private const long ChainStaleMs = 3_500;
     private long? _blindSinceMs;
+    private long? _lastCompleteListMs;
     private long _blindTotalMs;
     // PWM frames to a chain whose record cannot confirm them (RX blind, or the
     // chain absent from the last list) repeat a target only this often.
@@ -246,14 +257,12 @@ public sealed partial class Slv3Hub : IDisposable
     private int _rxRecoveries;
     private long _nextRxRecoveryMs;
 
-    // A reply opening with 0 is the RX's "no device list this cycle". It does
-    // this on its own every ~17 s for a few seconds and recovers without help,
-    // so only a busy spell this long is treated as a wedge. A wedge gets a fresh
-    // RX handle, never UsbResetAnother: the reset re-enumerates the RX, a Windows
-    // device sound each time.
+    // Zero-leading data has historically taken this recovery path, but neither
+    // a vendor busy status nor its transaction alignment has been verified.
+    // Preserve the threshold/reopen behavior while diagnosing it as ambiguous;
+    // this path does not send UsbResetAnother.
     private const int RxBusyPollsBeforeReset = 60;
     private int _rxBusyStreak;
-    private byte[]? _firstBusyReply;
 
     // L-Connect MasterDevice.ResetTx: consecutive TX failures (a reopen or a
     // connect attempt that gets no master MAC) -> UsbResetAnother written on the
@@ -401,7 +410,7 @@ public sealed partial class Slv3Hub : IDisposable
     // (up to MaxSlot, plus non-fan devices), so the poll requests
     // ceil(count/RecordsPerPage) pages. Clamp so a corrupt count can't trigger
     // a runaway read.
-    private const int MaxDeviceListPages = 3;
+    private const int MaxDeviceListPages = Slv3DeviceListObservation.MaximumPages;
     private int _lastRecordCount;
 
     public Slv3Hub(
@@ -503,6 +512,7 @@ public sealed partial class Slv3Hub : IDisposable
             {
                 _tx = _transportFactory(txPort);
                 _rx = _transportFactory(rxPort);
+                GetDevDiagnostics?.HandleOpened(_nowMs());
             }
             catch (Exception ex)
             {
@@ -587,6 +597,7 @@ public sealed partial class Slv3Hub : IDisposable
         _nextRxOpenMs = 0;
         _rxOpenFailures = 0;
         _blindSinceMs = null;
+        _lastCompleteListMs = null;
         _blindTotalMs = 0;
         _unconfirmedPwm.Clear();
         foreach (var control in _aioControl.Values)
@@ -1245,7 +1256,7 @@ public sealed partial class Slv3Hub : IDisposable
     {
         return !Slv3Protocol.MacIsZero(master) && !Slv3Protocol.MacEquals(master, _masterMac)
             && _liveMasters.TryGetValue(Convert.ToHexString(master, 0, Slv3Protocol.MacLength), out var poll)
-            && _devicePolls - poll < LiveMasterPolls;
+            && _completeDevicePolls - poll < LiveMasterPolls;
     }
 
     // L-Connect SyncControlInfo: with the lock on, every poll each chain this hub keeps bound (bind_to_master) whose
@@ -1718,7 +1729,10 @@ public sealed partial class Slv3Hub : IDisposable
                 _unconfirmedPwm.Remove(key);
                 continue;
             }
-            var confirmable = _blindSinceMs is null && _knownChains.TryGetValue(key, out var chain) && chain.Poll == _devicePolls;
+            // A valid record in a partial list is positive acknowledgement even
+            // while unobserved chains remain in the blind-time exclusion.
+            var confirmable = _knownChains.TryGetValue(key, out var chain) && chain.Poll == _devicePolls
+                && _pollRecords.Exists(r => Slv3Protocol.MacEquals(r.Mac, record.Mac));
             if (confirmable)
             {
                 _unconfirmedPwm.Remove(key);
@@ -2180,15 +2194,18 @@ public sealed partial class Slv3Hub : IDisposable
         // from the last poll's reported count (the reference auto-tunes the same
         // way); a chain that just appeared is picked up on the next poll.
         var pageCount = DeviceListPagesFor(_lastRecordCount);
-        if (!_rx.RfSend(Slv3Protocol.BuildGetDev(pageCount)))
+        var sent = _rx.RfSend(Slv3Protocol.BuildGetDev(pageCount));
+        if (!sent)
         {
+            ObserveGetDevLocked(pageCount, sent: false, ReadOnlySpan<byte>.Empty);
             // A failed write counts toward the same streak as an unreadable reply.
             return HandleGetDevFailureLocked();
         }
         var reply = _rx.RfRead(Slv3Protocol.PageLength * pageCount);
-        // A missing/invalid GetDev echo with a healthy handle is a wedged RX
-        // MCU (streak -> 0x15 reset); a valid reply listing zero devices is an
-        // RF sampling gap and takes the normal merge path.
+        ObserveGetDevLocked(pageCount, sent: true, reply);
+        // Preserve legacy acceptance/recovery while its framing is investigated.
+        // Zero-leading data is ambiguous; a missing/invalid echo is a failure,
+        // not proof that the receiver's radio or MCU is wedged.
         if (reply.Length > 0 && reply[0] == 0)
         {
             return HandleRxBusyLocked(reply);
@@ -2197,33 +2214,46 @@ public sealed partial class Slv3Hub : IDisposable
         {
             return HandleGetDevFailureLocked();
         }
-        _rxFailStreak = 0;
-        _rxBusyStreak = 0;
-        _rxRecoveries = 0;
-        _nextRxRecoveryMs = 0;
-        if (State.LinkStatus == Slv3LinkStatus.Recovering && _tx is { IsOpen: true })
-        {
-            State.LinkStatus = Slv3LinkStatus.Ok;
-        }
-
-        State.MotherboardPwmPercent = Slv3Protocol.ParseGetDevMoboDuty(reply);
-
-        var count = Slv3Protocol.RecordCount(reply);
+        var observation = Slv3DeviceListObservation.Read(reply, pageCount);
+        var count = observation.DeclaredRecords;
         var nowMs = _nowMs();
-        if (_blindSinceMs is { } blindSince)
+        if (observation.Complete)
         {
-            _blindTotalMs += nowMs - blindSince;
-            _blindSinceMs = null;
+            _rxFailStreak = 0;
+            _rxBusyStreak = 0;
+            _rxRecoveries = 0;
+            _nextRxRecoveryMs = 0;
+            if (State.LinkStatus == Slv3LinkStatus.Recovering && _tx is { IsOpen: true })
+                State.LinkStatus = Slv3LinkStatus.Ok;
+            if (_blindSinceMs is { } blindSince)
+            {
+                _blindTotalMs += nowMs - blindSince;
+                _blindSinceMs = null;
+            }
+            _completeDevicePolls++;
+            _lastCompleteListMs = nowMs;
         }
-        _devicePolls++;
-        var pollRecords = new List<Slv3DeviceRecord>(count);
-        for (var i = 0; i < count; i++)
+        else
+        {
+            // A header is not a complete answered observation. Keep existing
+            // recovery/backoff and known-chain absence clocks, without sending
+            // an additional recovery command for a structurally partial sample.
+            // The interval since the preceding complete sample has no proven
+            // answered absence. Exclude it even if this first partial sample
+            // arrives after the ordinary expiry deadline.
+            _blindSinceMs ??= _lastCompleteListMs ?? nowMs;
+        }
+        State.MotherboardPwmPercent = Slv3Protocol.ParseGetDevMoboDuty(reply);
+        if (observation.Complete || observation.ValidRecords > 0) _devicePolls++;
+        var blindMs = _blindTotalMs + (_blindSinceMs is { } since ? nowMs - since : 0);
+        var pollRecords = new List<Slv3DeviceRecord>(observation.ValidRecords);
+        for (var i = 0; i < observation.AvailableRecords; i++)
         {
             var offset = Slv3Protocol.RecordHeaderLength + i * Slv3Protocol.RecordLength;
             var parsed = Slv3Protocol.TryParseRecord(reply, offset, out var record);
             if (parsed && record.IsMaster)
             {
-                _liveMasters[Convert.ToHexString(record.Mac)] = _devicePolls;
+                _liveMasters[Convert.ToHexString(record.Mac)] = _completeDevicePolls;
             }
             else if (parsed && record.IsWirelessFan)
             {
@@ -2264,13 +2294,13 @@ public sealed partial class Slv3Hub : IDisposable
                         ServiceLog.Info(line);
                     }
                 }
-                _knownChains[key] = new Slv3KnownChain(record, nowMs, _devicePolls, _blindTotalMs);
+                _knownChains[key] = new Slv3KnownChain(record, nowMs, _devicePolls, blindMs);
             }
         }
         _pollRecords = pollRecords;
         UpdateReportOrderLocked(pollRecords);
 
-        ExpireChainsLocked(nowMs);
+        if (observation.Complete) ExpireChainsLocked(nowMs);
 
         // Page estimate follows the larger of the reply's count and the tracked
         // set, so a partial report can't shrink the next read below the full list.
@@ -2314,7 +2344,7 @@ public sealed partial class Slv3Hub : IDisposable
         List<string>? gone = null;
         foreach (var (master, poll) in new List<KeyValuePair<string, long>>(_liveMasters))
         {
-            if (_devicePolls - poll >= LiveMasterPolls)
+            if (_completeDevicePolls - poll >= LiveMasterPolls)
             {
                 _liveMasters.Remove(master);
             }
@@ -2417,20 +2447,26 @@ public sealed partial class Slv3Hub : IDisposable
         return keys;
     }
 
-    // The RX answered but has no list: keep the last-known one.
+    private void ObserveGetDevLocked(int pageCount, bool sent, ReadOnlySpan<byte> reply)
+    {
+        if (GetDevDiagnostics is not { } diagnostics) return;
+        var nowMs = _nowMs();
+        var native = _rx is ISlv3TransportDiagnostics transport ? transport.LastIoObservation : default;
+        diagnostics.Observe(nowMs, pageCount, sent, reply, native);
+        if (diagnostics.TryReport(nowMs) is { } report) ServiceLog.Info(report);
+    }
+
+    // Ambiguous zero-leading data: retain the legacy last-known-list behavior.
     private bool HandleRxBusyLocked(byte[] reply)
     {
         AgeChainsLocked(_nowMs());
-        if (++_rxBusyStreak == 1)
-        {
-            _firstBusyReply = reply;
-        }
+        _rxBusyStreak++;
         if (_rxBusyStreak < RxBusyPollsBeforeReset)
         {
             return true;
         }
-        var first = _firstBusyReply is { } b ? Convert.ToHexString(b, 0, Math.Min(b.Length, Slv3Protocol.UsbPacketSize)) : "";
-        return BeginRxRecoveryLocked($"{RxBusyPollsBeforeReset} consecutive busy GetDev replies (first {first})", resetViaTx: false);
+        return BeginRxRecoveryLocked(Slv3GetDevDiagnostics.DescribeAmbiguousRecovery(
+            _rxBusyStreak, _rxFailStreak, RxBusyPollsBeforeReset), resetViaTx: false);
     }
 
     // Only a good reply clears the busy and failure streaks, so an RX that
@@ -2444,7 +2480,8 @@ public sealed partial class Slv3Hub : IDisposable
             // Transient: keep the last-known list and let the next tick retry.
             return true;
         }
-        return BeginRxRecoveryLocked($"{RxFailStreakForReset} consecutive GetDev failures", resetViaTx: true);
+        return BeginRxRecoveryLocked(Slv3GetDevDiagnostics.DescribeFailureRecovery(
+            _rxFailStreak, _rxBusyStreak, RxFailStreakForReset), resetViaTx: true);
     }
 
     // Resets the RX half by writing UsbResetAnother on the TX handle, or just
@@ -2522,7 +2559,8 @@ public sealed partial class Slv3Hub : IDisposable
         }
         _rxOpenFailures = 0;
         _nextRxOpenMs = 0;
-        ServiceLog.Info("[lianli-wireless] RX reopened");
+        GetDevDiagnostics?.HandleOpened(nowMs);
+        ServiceLog.Info("[lianli-wireless] RX reopened (handle only; GetDev header/record response not yet observed)");
     }
 
     // Bound to us = our master MAC and a valid slot. A release clears both in

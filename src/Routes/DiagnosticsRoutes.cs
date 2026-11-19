@@ -82,8 +82,9 @@ internal static class DiagnosticsRoutes
         // heap + DOM. One endpoint, one log tag, two shapes keyed off Source.
         if (string.Equals(b.Source, "host", StringComparison.Ordinal))
         {
-            // `largest` is the heaviest WebView2 child (the renderer); `total`
-            // sums every WebView2 child of this host.
+            // `largest` is the heaviest measured WebView2 process; `total`
+            // sums complete environment-owned membership (excluding crashpad).
+            // Working sets may share pages; neither value identifies JS/GPU allocations.
             return $"[client-mem] host total={b.TotalWsMB?.ToString() ?? "?"}MB "
                 + $"largest={b.LargestWsMB?.ToString() ?? "?"}MB(pid {b.LargestPid?.ToString() ?? "?"}) "
                 + $"children={b.Children?.ToString() ?? "?"}";

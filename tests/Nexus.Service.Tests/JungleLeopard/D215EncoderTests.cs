@@ -23,7 +23,7 @@ public sealed class D215EncoderTests
         var frame = Quadrants(width, height, colors);
 
         frames.Queue(frame);
-        var envelope = frames.TakeLatestEnvelope().Span;
+        var envelope = frames.TakeEnvelopeSnapshot().Span;
 
         using var image = TestImages.Decode(envelope[4..^2].ToArray());
         Assert.Equal((756, 1680), (image.Width, image.Height));
@@ -45,21 +45,21 @@ public sealed class D215EncoderTests
         frames.BindFlip180(() => flip180);
         SKColor[] colors = [SKColors.Red, SKColors.Lime, SKColors.Blue, SKColors.Yellow];
         frames.Queue(Quadrants(landscape ? 1680 : 756, landscape ? 756 : 1680, colors));
-        var original = frames.TakeLatestEnvelope();
-        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        var original = frames.TakeEnvelopeSnapshot();
+        Assert.True(frames.TakeEnvelopeSnapshot().IsEmpty);
 
         flip180 = true;
         mayRepeat = false;
-        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.True(frames.TakeEnvelopeSnapshot().IsEmpty);
         mayRepeat = true;
-        var rotated = frames.TakeLatestEnvelope();
+        var rotated = frames.TakeEnvelopeSnapshot();
         Assert.False(rotated.IsEmpty);
         using var image = TestImages.Decode(rotated.Span[4..^2].ToArray());
         AssertColor(landscape ? SKColors.Blue : SKColors.Yellow, image.GetPixel(189, 420));
-        Assert.True(frames.TakeLatestEnvelope().IsEmpty);
+        Assert.True(frames.TakeEnvelopeSnapshot().IsEmpty);
 
         flip180 = false;
-        Assert.Equal(original.ToArray(), frames.TakeLatestEnvelope().ToArray());
+        Assert.Equal(original.ToArray(), frames.TakeEnvelopeSnapshot().ToArray());
         Assert.Equal(0, frames.DroppedFrames);
     }
 
@@ -87,7 +87,7 @@ public sealed class D215EncoderTests
 
         frames.Queue(frame);
 
-        var envelope = frames.TakeLatestEnvelope().Span;
+        var envelope = frames.TakeEnvelopeSnapshot().Span;
         Assert.False(envelope.IsEmpty);
         Assert.Equal((uint)(envelope.Length - 6), BinaryPrimitives.ReadUInt32LittleEndian(envelope));
         using var image = TestImages.Decode(envelope[4..^2].ToArray());
@@ -115,7 +115,7 @@ public sealed class D215EncoderTests
 
         frames.Queue(frame);
 
-        var envelope = frames.TakeLatestEnvelope().Span;
+        var envelope = frames.TakeEnvelopeSnapshot().Span;
         Assert.False(envelope.IsEmpty);
         Assert.Equal((uint)(envelope.Length - 6), BinaryPrimitives.ReadUInt32LittleEndian(envelope));
         using var image = TestImages.Decode(envelope[4..^2].ToArray());

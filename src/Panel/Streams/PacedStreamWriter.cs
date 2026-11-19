@@ -111,6 +111,7 @@ public sealed class PacedStreamWriter : IDisposable
                         $"maxInGap={stats.MaxIngestGapMs}ms");
                     _lastStats = stats;
                     _lastStatsLogTicks = now;
+                    _session.ReportDiagnostics();
                 }
                 // A late tick (blocked write, empty stretch) must not bank
                 // debt that later bursts the wire; re-anchor instead. What
@@ -136,6 +137,7 @@ public sealed class PacedStreamWriter : IDisposable
         finally
         {
             if (OperatingSystem.IsWindows()) TimeEndPeriod(1);
+            _session.ReportDiagnostics(final: true);
         }
     }
 
@@ -179,10 +181,12 @@ public sealed class PacedStreamWriter : IDisposable
 
     private bool TryWrite(IStreamedPanelTransport transport, ReadOnlySpan<byte> payload, bool isIdr)
     {
+        var diagnostics = _session.Diagnostics;
+        var writeStart = Stopwatch.GetTimestamp();
         try
         {
-            var writeStart = Stopwatch.GetTimestamp();
             transport.Write(payload);
+            diagnostics?.TransportCompleted(true, payload.Length, writeStart, Stopwatch.GetTimestamp());
             // A blocked write is downstream backpressure (socket buffer, adb
             // forwarding, device fifo); on a render-on-arrival device every
             // stall shows on glass as a time snap when the backlog flushes.
@@ -196,6 +200,7 @@ public sealed class PacedStreamWriter : IDisposable
         }
         catch (Exception ex)
         {
+            diagnostics?.TransportCompleted(false, payload.Length, writeStart, Stopwatch.GetTimestamp());
             ClearTransport();
             _onTransportFault(transport, ex);
             return false;

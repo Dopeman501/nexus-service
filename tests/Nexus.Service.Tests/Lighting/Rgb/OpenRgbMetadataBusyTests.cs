@@ -11,6 +11,112 @@ public sealed class OpenRgbMetadataBusyTests
     private const uint Capability = 1u << 17;
     private const uint Busy = 6;
 
+    [Theory]
+    [InlineData("settings")]
+    [InlineData("rescan")]
+    [InlineData("disconnect")]
+    public async Task Redetection_commands_recheck_generation_after_waiting_for_request_admission(string command)
+    {
+        await using var daemon = new Daemon(grant: true);
+        await using var controller = new OpenRgbController(port: daemon.Port);
+        Assert.True(await controller.TryConnectAsync());
+        var transport = (IOpenRgbRefreshTransport)controller;
+        var generation = controller.ConnectionGeneration;
+        var requestLock = (SemaphoreSlim)typeof(OpenRgbController).GetField("_requestLock",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(controller)!;
+        await requestLock.WaitAsync();
+        Task<bool?> pending;
+        try
+        {
+            pending = command switch
+            {
+                "settings" => transport.TrySetSettingsAsync("Detectors", "{}", generation, () => true, default),
+                "rescan" => transport.TryRescanAsync(generation, () => true, default),
+                _ => Disconnect(),
+            };
+            Assert.False(pending.IsCompleted);
+            typeof(OpenRgbController).GetField("_connectionGeneration", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(controller, generation + 1);
+        }
+        finally { requestLock.Release(); }
+        Assert.NotEqual(true, await pending);
+        Assert.True(controller.IsConnected);
+        await controller.GetControllerAddressesAsync();
+        Assert.Equal(0, daemon.RefreshCommands);
+        async Task<bool?> Disconnect() => await transport.TryDisconnectAsync(generation, () => true, default);
+    }
+
+    [Fact]
+    public async Task Current_redetection_commands_preserve_acknowledgement_and_local_client_requirements()
+    {
+        await using var daemon = new Daemon(grant: true);
+        await using var controller = new OpenRgbController(port: daemon.Port);
+        Assert.True(await controller.TryConnectAsync());
+        var transport = (IOpenRgbRefreshTransport)controller;
+        var generation = controller.ConnectionGeneration;
+        Assert.Null(await transport.TrySetSettingsAsync("Detectors", "{}", generation, () => false, default));
+        Assert.Null(await transport.TryRescanAsync(generation, () => false, default));
+        Assert.True(await transport.TrySetSettingsAsync("Detectors", "{}", generation, () => true, default));
+        Assert.True(await transport.TryRescanAsync(generation, () => true, default));
+        Assert.Equal(2, daemon.RefreshCommands);
+        Assert.False(await transport.TryDisconnectAsync(generation, () => false, default));
+        Assert.True(controller.IsConnected);
+        Assert.True(await transport.TryDisconnectAsync(generation, () => true, default));
+        Assert.False(controller.IsConnected);
+        Assert.False(await transport.TrySetSettingsAsync("Detectors", "{}", generation, () => true, default));
+        Assert.False(await transport.TryRescanAsync(generation, () => true, default));
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Refresh_commands_check_expected_connection_after_waiting_for_the_request_lock(bool resize)
+    {
+        await using var daemon = new Daemon(grant: true);
+        await using var controller = new OpenRgbController(port: daemon.Port);
+        Assert.True(await controller.TryConnectAsync());
+        var transport = (IOpenRgbRefreshTransport)controller;
+        var generation = controller.ConnectionGeneration;
+        var requestLock = (SemaphoreSlim)typeof(OpenRgbController).GetField("_requestLock",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!.GetValue(controller)!;
+        await requestLock.WaitAsync();
+        Task<bool> pending;
+        try
+        {
+            pending = resize
+                ? transport.TryResizeZoneAsync(3, 0, 8, generation, () => true, default)
+                : transport.TrySetDirectModeAsync(new() { Address = 3 }, generation, () => true, default);
+            Assert.False(pending.IsCompleted);
+            // Deterministically advance the connection epoch while admission is parked.
+            typeof(OpenRgbController).GetField("_connectionGeneration", System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!
+                .SetValue(controller, generation + 1);
+        }
+        finally { requestLock.Release(); }
+        Assert.False(await pending);
+        await controller.GetControllerAddressesAsync(); // Drain through an acknowledged request before counting writes.
+        Assert.Equal(0, daemon.RefreshCommands);
+    }
+
+    [Fact]
+    public async Task Refresh_admission_preserves_healthy_commands_and_rejects_retired_lifecycles()
+    {
+        await using var daemon = new Daemon(grant: true);
+        await using var controller = new OpenRgbController(port: daemon.Port);
+        Assert.True(await controller.TryConnectAsync());
+        var transport = (IOpenRgbRefreshTransport)controller;
+        var generation = controller.ConnectionGeneration;
+        Assert.False(await transport.TrySetDirectModeAsync(new() { Address = 3 }, generation, () => false, default));
+        Assert.False(await transport.TryResizeZoneAsync(3, 0, 8, generation, () => false, default));
+        Assert.True(await transport.TrySetDirectModeAsync(new() { Address = 3 }, generation, () => true, default));
+        Assert.True(await transport.TryResizeZoneAsync(3, 0, 8, generation, () => true, default));
+        await controller.GetControllerAddressesAsync();
+        Assert.Equal(2, daemon.RefreshCommands);
+        var published = 0;
+        Assert.True(transport.TryPublishConnection(generation, () => published++));
+        Assert.False(transport.TryPublishConnection(generation - 1, () => published++));
+        Assert.Equal(1, published);
+    }
+
     [Fact]
     public async Task Client_requests_nonblocking_metadata_capability()
     {
@@ -77,6 +183,7 @@ public sealed class OpenRgbMetadataBusyTests
         private TcpClient? _peer;
         public volatile bool BusySecondDevice;
         public uint ClientFlags { get; private set; }
+        public int RefreshCommands;
         public TaskCompletionSource FrameReceived { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
@@ -143,6 +250,10 @@ public sealed class OpenRgbMetadataBusyTests
                 await SendAsync(stream, address, id, Convert.FromHexString(fixture.RootElement.GetProperty("controllers")[0].GetString()!));
             }
             else if (id == OpenRgbProtocol.PacketId.RgbControllerUpdateLeds) FrameReceived.TrySetResult();
+            else if (id is OpenRgbProtocol.PacketId.SetCustomMode or OpenRgbProtocol.PacketId.RgbControllerResizeZone
+                or OpenRgbProtocol.PacketId.RgbControllerUpdateMode or OpenRgbProtocol.PacketId.SettingsManagerSetSettings
+                or OpenRgbProtocol.PacketId.RequestRescanDevices)
+                Interlocked.Increment(ref RefreshCommands);
             return OpenRgbProtocol.StatusOk;
         }
 

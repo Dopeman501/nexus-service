@@ -17,7 +17,8 @@ public sealed partial class LightingProvider
     private void InitializeAudioTrigger()
     {
         _audioTriggerMedia = new LightingAudioTriggerMediaResources(_media);
-        _audioTrigger = new LightingAudioTriggerController(BuildAudioTriggerLook, _audioTriggerMedia.Reset);
+        _audioTrigger = new LightingAudioTriggerController(BuildAudioTriggerLook, _audioTriggerMedia.Reset,
+            _audioTriggerMedia.ReconcileDemand);
         _engine.AudioTrigger = _audioTrigger;
         _store.OnChanged += RefreshAudioTrigger;
         if (_beats is { } beats)

@@ -169,20 +169,57 @@ public static class Slv3LcdProtocol
     /// </summary>
     public static byte[] BuildTransferBuffer(ReadOnlySpan<byte> encryptedHeader, ReadOnlySpan<byte> jpeg)
     {
+        ValidateTransfer(encryptedHeader, jpeg);
+        var buffer = new byte[TransferBufferSize];
+        WriteTransferBuffer(encryptedHeader, jpeg, buffer);
+        return buffer;
+    }
+
+    /// <summary>Formats an exact-size packet disjoint from both inputs, clearing stale padding.</summary>
+    public static void WriteTransferBuffer(ReadOnlySpan<byte> encryptedHeader, ReadOnlySpan<byte> jpeg, Span<byte> destination)
+    {
+        ValidateTransfer(encryptedHeader, jpeg);
+        ValidateDestination(destination);
+        RejectOverlap(encryptedHeader, destination);
+        RejectOverlap(jpeg, destination);
+        encryptedHeader.CopyTo(destination);
+        jpeg.CopyTo(destination.Slice(HeaderCipherSize));
+        destination.Slice(HeaderCipherSize + jpeg.Length).Clear();
+    }
+
+    private static void ValidateDestination(Span<byte> destination)
+    {
+        if (destination.Length != TransferBufferSize)
+        {
+            throw new ArgumentException($"Destination must be exactly {TransferBufferSize} bytes.", nameof(destination));
+        }
+    }
+
+    private static void RejectOverlap(ReadOnlySpan<byte> input, Span<byte> destination)
+    {
+        if (input.Overlaps(destination))
+        {
+            throw new ArgumentException("Destination must not overlap packet inputs.", nameof(destination));
+        }
+    }
+
+    private static void ValidateTransfer(ReadOnlySpan<byte> encryptedHeader, ReadOnlySpan<byte> jpeg)
+    {
         if (encryptedHeader.Length != HeaderCipherSize)
         {
             throw new ArgumentException($"Encrypted header must be {HeaderCipherSize} bytes.", nameof(encryptedHeader));
         }
+        ValidateJpeg(jpeg);
+    }
+
+    private static void ValidateJpeg(ReadOnlySpan<byte> jpeg)
+    {
         var maxJpeg = TransferBufferSize - HeaderCipherSize;
         if (jpeg.Length > maxJpeg)
         {
             throw new ArgumentException(
                 $"JPEG of {jpeg.Length} bytes exceeds the {maxJpeg}-byte payload capacity.", nameof(jpeg));
         }
-        var buffer = new byte[TransferBufferSize];
-        encryptedHeader.CopyTo(buffer);
-        jpeg.CopyTo(buffer.AsSpan(HeaderCipherSize));
-        return buffer;
     }
 
     /// <summary>Builds the full PushJpg transfer buffer from plaintext parameters in one call.</summary>
@@ -191,6 +228,17 @@ public static class Slv3LcdProtocol
         var plainHeader = BuildLengthHeader(CmdType.PushJpg, timestampMs, jpeg.Length);
         var encryptedHeader = EncryptHeader(plainHeader);
         return BuildTransferBuffer(encryptedHeader, jpeg);
+    }
+
+    /// <summary>Builds an image packet in caller-owned storage; header crypto remains unchanged.</summary>
+    public static void WritePushJpgBuffer(uint timestampMs, ReadOnlySpan<byte> jpeg, Span<byte> destination)
+    {
+        ValidateJpeg(jpeg);
+        ValidateDestination(destination);
+        RejectOverlap(jpeg, destination);
+        var plainHeader = BuildLengthHeader(CmdType.PushJpg, timestampMs, jpeg.Length);
+        var encryptedHeader = EncryptHeader(plainHeader);
+        WriteTransferBuffer(encryptedHeader, jpeg, destination);
     }
 
     /// <summary>Builds the encrypted 512-byte header for a single-byte-arg command; no JPEG follows.</summary>

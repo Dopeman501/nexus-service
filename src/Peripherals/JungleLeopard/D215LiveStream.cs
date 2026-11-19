@@ -10,8 +10,9 @@ namespace Nexus.Service.Peripherals.JungleLeopard;
 internal interface ID215FrameSource
 {
     // The pump may retain this complete envelope until another frame replaces it.
-    ReadOnlyMemory<byte> TakeLatestEnvelope();
+    D215EnvelopeLease TakeLatestEnvelope();
     bool MayRepeat { get; }
+    D215FrameDiagnostics? Diagnostics => null;
 }
 
 /// <summary>One wire pump from the first live-mode request through the final clear.</summary>
@@ -145,97 +146,117 @@ internal sealed class D215LiveStream
         var nextRenewal = ScheduleRenewal(TimeSpan.Zero);
         var nextFrame = TimeSpan.Zero;
         var nextReport = ReportInterval;
-        ReadOnlyMemory<byte> retained = default;
+        D215EnvelopeLease retained = default;
         int sent = 0, liveEntries = 1, renewals = 0;
         long bytes = 0;
         var slowestWrite = TimeSpan.Zero;
         var liveActive = true;
 
-        while (!StopRequested && isAuthorized())
+        try
         {
-            abort.ThrowIfCancellationRequested();
-            if (Volatile.Read(ref _brightness) is { } brightness)
+            while (!StopRequested && isAuthorized())
             {
-                if (await ApplyBrightnessAsync(wire, brightness, isAuthorized, abort).ConfigureAwait(false))
+                var diagnostics = frames.Diagnostics;
+                abort.ThrowIfCancellationRequested();
+                if (Volatile.Read(ref _brightness) is { } brightness)
                 {
-                    liveActive = false;
-                    if (StopRequested || !isAuthorized() || !brightness.IsAuthorized()) break;
-                    var requestedAt = clock.GetElapsedTime(origin);
-                    await wire.EnterLiveAsync(abort).ConfigureAwait(false);
-                    Volatile.Write(ref _liveActive, 1);
-                    liveEntries++;
-                    nextRenewal = ScheduleRenewal(requestedAt);
-                    liveActive = true;
-                }
-                continue;
-            }
-
-            var now = clock.GetElapsedTime(origin);
-            if (now >= nextRenewal)
-            {
-                await RenewAsync().ConfigureAwait(false);
-                continue;
-            }
-
-            if (now >= nextFrame)
-            {
-                // Pace complete frame work from its start, including encoding and
-                // serial delivery, instead of adding encode time to every interval.
-                var frameStartedAt = clock.GetTimestamp();
-                var latest = frames.TakeLatestEnvelope();
-                if (!latest.IsEmpty) retained = latest;
-                var frame = !latest.IsEmpty || frames.MayRepeat ? retained : default;
-                if (StopRequested || !isAuthorized()) break;
-
-                if (!frame.IsEmpty)
-                {
-                    // Encoding may cross the renewal deadline. Renew before starting an envelope.
-                    var encodedAt = clock.GetElapsedTime(origin);
-                    if (encodedAt >= nextRenewal
-                        || (slowestWrite >= timing.FrameInterval && encodedAt + slowestWrite >= nextRenewal))
+                    if (await ApplyBrightnessAsync(wire, brightness, isAuthorized, abort).ConfigureAwait(false))
                     {
-                        await RenewAsync().ConfigureAwait(false);
-                        if (StopRequested || !isAuthorized()) break;
+                        liveActive = false;
+                        if (StopRequested || !isAuthorized() || !brightness.IsAuthorized()) break;
+                        var requestedAt = clock.GetElapsedTime(origin);
+                        await wire.EnterLiveAsync(abort).ConfigureAwait(false);
+                        Volatile.Write(ref _liveActive, 1);
+                        liveEntries++;
+                        nextRenewal = ScheduleRenewal(requestedAt);
+                        liveActive = true;
                     }
-                    var writeStart = clock.GetTimestamp();
-                    await wire.WriteAsync(frame, abort).ConfigureAwait(false);
-                    var duration = clock.GetElapsedTime(writeStart);
-                    if (duration > slowestWrite) slowestWrite = duration;
-                    sent++;
-                    bytes += frame.Length;
-                }
-                // An overrun starts a new period at completion; missed slots never
-                // accumulate into a catch-up burst or an extra artificial idle slot.
-                var scheduled = clock.GetElapsedTime(origin, frameStartedAt) + timing.FrameInterval;
-                var completed = clock.GetElapsedTime(origin);
-                nextFrame = scheduled > completed ? scheduled : completed;
-            }
-
-            now = clock.GetElapsedTime(origin);
-            if (now >= nextReport)
-            {
-                Report(sent, liveEntries, renewals, bytes, slowestWrite);
-                nextReport = now + ReportInterval;
-            }
-
-            var wakeAt = nextRenewal < nextFrame ? nextRenewal : nextFrame;
-            if (wakeAt > now)
-            {
-                if (preciseClock is not null)
-                {
-                    if (!preciseClock.WaitForDelay(wakeAt - now)) break;
                     continue;
                 }
-                // Task.Delay truncates fractional milliseconds. A positive
-                // submillisecond remainder must yield instead of busy-spinning.
-                var delay = TimeSpan.FromMilliseconds(Math.Ceiling((wakeAt - now).TotalMilliseconds));
-                try { await Task.Delay(delay, clock, _wake.Token).ConfigureAwait(false); }
-                catch (OperationCanceledException) when (StopRequested) { }
-            }
-        }
 
-        Report(sent, liveEntries, renewals, bytes, slowestWrite);
-        return liveActive;
+                var now = clock.GetElapsedTime(origin);
+                if (now >= nextRenewal)
+                {
+                    await RenewAsync().ConfigureAwait(false);
+                    continue;
+                }
+
+                if (now >= nextFrame)
+                {
+                    // Pace complete frame work from its start, including encoding and
+                    // serial delivery, instead of adding encode time to every interval.
+                    var frameStartedAt = clock.GetTimestamp();
+                    var latest = frames.TakeLatestEnvelope();
+                    if (!latest.IsEmpty)
+                    {
+                        retained.Dispose(); // The previous awaited native write has actually terminated.
+                        retained = latest;
+                    }
+                    var frame = !latest.IsEmpty || frames.MayRepeat ? retained : default;
+                    if (StopRequested || !isAuthorized()) break;
+
+                    if (!frame.IsEmpty)
+                    {
+                        // Encoding may cross the renewal deadline. Renew before starting an envelope.
+                        var encodedAt = clock.GetElapsedTime(origin);
+                        if (encodedAt >= nextRenewal
+                            || (slowestWrite >= timing.FrameInterval && encodedAt + slowestWrite >= nextRenewal))
+                        {
+                            await RenewAsync().ConfigureAwait(false);
+                            if (StopRequested || !isAuthorized()) break;
+                        }
+                        var writeStart = clock.GetTimestamp();
+                        var writeSucceeded = false;
+                        try
+                        {
+                            await wire.WriteAsync(frame.Memory, abort).ConfigureAwait(false);
+                            writeSucceeded = true;
+                        }
+                        finally
+                        {
+                            diagnostics?.Written(!latest.IsEmpty, writeSucceeded,
+                                clock.GetElapsedTime(writeStart).TotalMilliseconds);
+                        }
+                        var duration = clock.GetElapsedTime(writeStart);
+                        if (duration > slowestWrite) slowestWrite = duration;
+                        sent++;
+                        bytes += frame.Length;
+                    }
+                    // An overrun starts a new period at completion; missed slots never
+                    // accumulate into a catch-up burst or an extra artificial idle slot.
+                    var scheduled = clock.GetElapsedTime(origin, frameStartedAt) + timing.FrameInterval;
+                    var completed = clock.GetElapsedTime(origin);
+                    nextFrame = scheduled > completed ? scheduled : completed;
+                }
+
+                now = clock.GetElapsedTime(origin);
+                if (diagnostics is not null && frames is D215BgraFrames rawFrames) rawFrames.ReportDiagnostics();
+                if (now >= nextReport)
+                {
+                    Report(sent, liveEntries, renewals, bytes, slowestWrite);
+                    nextReport = now + ReportInterval;
+                }
+
+                var wakeAt = nextRenewal < nextFrame ? nextRenewal : nextFrame;
+                if (wakeAt > now)
+                {
+                    if (preciseClock is not null)
+                    {
+                        if (!preciseClock.WaitForDelay(wakeAt - now)) break;
+                        continue;
+                    }
+                    // Task.Delay truncates fractional milliseconds. A positive
+                    // submillisecond remainder must yield instead of busy-spinning.
+                    var delay = TimeSpan.FromMilliseconds(Math.Ceiling((wakeAt - now).TotalMilliseconds));
+                    try { await Task.Delay(delay, clock, _wake.Token).ConfigureAwait(false); }
+                    catch (OperationCanceledException) when (StopRequested) { }
+                }
+            }
+
+            Report(sent, liveEntries, renewals, bytes, slowestWrite);
+            return liveActive;
+        }
+        finally { retained.Dispose(); }
 
         async ValueTask RenewAsync()
         {

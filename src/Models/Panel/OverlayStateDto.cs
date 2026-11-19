@@ -6,6 +6,7 @@ namespace Nexus.Service.Models.Panel;
 /// <summary>GET /overlay/state: everything nexus-overlay reconciles against, in one read.</summary>
 public sealed class OverlayStateResponse
 {
+    public Nexus.Service.Diagnostics.EfficiencyLeaseProjection? Efficiency { get; set; }
     public bool AutoLaunch { get; set; }
     public bool ReserveMonitor { get; set; }
     public bool PanelAlwaysOnTop { get; set; } = true;

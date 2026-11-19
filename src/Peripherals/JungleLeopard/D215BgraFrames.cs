@@ -1,6 +1,7 @@
 using System;
 using System.Diagnostics;
 using System.Threading;
+using Nexus.Service.Diagnostics;
 using Nexus.Service.Peripherals.JpegPanels;
 using Nexus.Service.Peripherals.PixelFormats;
 using Nexus.Service.Platform;
@@ -22,9 +23,13 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
     private static readonly int[] Qualities = [BgraJpegEncoder.Quality, 70, 55];
 
     private readonly object _queueLock = new();
+    private readonly D215EnvelopePool _envelopes = new();
     private readonly int _frameBytes;
     private readonly Func<int, ID215JpegEncoder> _makeEncoder;
     private readonly Func<bool>? _mayRepeat;
+    private readonly D215FrameDiagnostics? _explicitDiagnostics;
+    private readonly DiagnosticLeaseOwner<D215FrameDiagnostics> _diagnosticOwner = new();
+    private D215FrameDiagnostics? _diagnostics => _explicitDiagnostics ?? _diagnosticOwner.Get(static () => new D215FrameDiagnostics());
     private readonly ID215JpegEncoder?[] _encoders = new ID215JpegEncoder?[Qualities.Length];
     private readonly byte[]? _portrait;
     private byte[]? _oriented;
@@ -46,18 +51,20 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
     private long _freshAgeTicks;
     private long? _lastTimingReport;
 
-    internal D215BgraFrames(int frameBytes, Func<int, ID215JpegEncoder> makeEncoder, Func<bool>? mayRepeat = null)
-        : this(frameBytes, makeEncoder, mayRepeat, rotateLandscape: false)
+    internal D215BgraFrames(int frameBytes, Func<int, ID215JpegEncoder> makeEncoder, Func<bool>? mayRepeat = null,
+        D215FrameDiagnostics? diagnostics = null)
+        : this(frameBytes, makeEncoder, mayRepeat, rotateLandscape: false, diagnostics)
     {
     }
 
     private D215BgraFrames(int frameBytes, Func<int, ID215JpegEncoder> makeEncoder, Func<bool>? mayRepeat,
-        bool rotateLandscape)
+        bool rotateLandscape, D215FrameDiagnostics? diagnostics = null)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(frameBytes);
         _frameBytes = frameBytes;
         _makeEncoder = makeEncoder;
         _mayRepeat = mayRepeat;
+        _explicitDiagnostics = diagnostics;
         _partial = new byte[frameBytes];
         _pending = new byte[frameBytes];
         _active = new byte[frameBytes];
@@ -68,6 +75,8 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
         new(Width * Height * BytesPerPixel, static quality => new JpegEncoder(quality), mayRepeat, rotateLandscape);
 
     internal long DroppedFrames => Interlocked.Read(ref _droppedFrames);
+    internal D215FrameDiagnostics? Diagnostics => _diagnostics;
+    D215FrameDiagnostics? ID215FrameSource.Diagnostics => _diagnostics;
 
     internal void BindFlip180(Func<bool> source) => _readFlip180 = source;
 
@@ -94,6 +103,7 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
             {
                 var skipped = completeFrames - 1;
                 Interlocked.Add(ref _droppedFrames, skipped);
+                _diagnostics?.Coalesced(skipped);
                 bytes = bytes[(skipped * _frameBytes)..];
                 bytes[.._frameBytes].CopyTo(_partial);
                 CompleteFrame();
@@ -107,54 +117,77 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
 
     private void CompleteFrame()
     {
-        if (_hasPending) Interlocked.Increment(ref _droppedFrames);
+        if (_hasPending)
+        {
+            Interlocked.Increment(ref _droppedFrames);
+            _diagnostics?.Replaced();
+        }
         (_partial, _pending) = (_pending, _partial);
         _hasPending = true;
         _pendingAt = Stopwatch.GetTimestamp();
         _partialLength = 0;
     }
 
-    public ReadOnlyMemory<byte> TakeLatestEnvelope()
+    public D215EnvelopeLease TakeLatestEnvelope()
     {
-        var flip180 = _readFlip180?.Invoke() == true;
-        // The gate belongs to the coordinator; never call it while holding the
-        // producer queue lock, since it may acquire the coordinator's lock.
-        var mayRepeat = MayRepeat;
-        long queuedAt;
-        bool fresh;
-        lock (_queueLock)
+        var diagnostics = _diagnostics;
+        if (!_envelopes.TryRent(out var reservation, out var retired))
         {
-            if (_disposed) return ReadOnlyMemory<byte>.Empty;
-            fresh = _hasPending;
-            if (fresh)
-            {
-                (_pending, _active) = (_active, _pending);
-                _hasPending = false;
-                _hasActive = true;
-            }
-            else if (!_hasActive || flip180 == _activeFlip180 || !mayRepeat)
-            {
-                return ReadOnlyMemory<byte>.Empty;
-            }
-            queuedAt = _pendingAt;
+            if (retired) diagnostics?.RetiredTake();
+            else diagnostics?.PoolExhausted();
+            ReportDiagnostics();
+            return default;
         }
+        var transferred = false;
+        try
+        {
+            var flip180 = _readFlip180?.Invoke() == true;
+            // The gate belongs to the coordinator; never call it while holding the
+            // producer queue lock, since it may acquire the coordinator's lock.
+            var mayRepeat = MayRepeat;
+            long queuedAt;
+            bool fresh;
+            lock (_queueLock)
+            {
+                if (_disposed) return default;
+                fresh = _hasPending;
+                if (fresh)
+                {
+                    (_pending, _active) = (_active, _pending);
+                    _hasPending = false;
+                    _hasActive = true;
+                }
+                else if (!_hasActive || flip180 == _activeFlip180 || !mayRepeat)
+                {
+                    return default;
+                }
+                queuedAt = _pendingAt;
+            }
+            diagnostics?.Taken(fresh);
 
-        var encodeStartedAt = Stopwatch.GetTimestamp();
-        var envelope = EncodeActiveFrame(flip180);
-        if (envelope.IsEmpty)
-        {
-            Interlocked.Increment(ref _droppedFrames);
+            var encodeStartedAt = Stopwatch.GetTimestamp();
+            var envelope = EncodeActiveFrame(flip180, reservation, diagnostics);
+            if (diagnostics is not null)
+                diagnostics.Encoded(fresh, !envelope.IsEmpty, queuedAt, encodeStartedAt, Stopwatch.GetTimestamp());
+            if (envelope.IsEmpty)
+            {
+                Interlocked.Increment(ref _droppedFrames);
+                diagnostics?.Rejected();
+            }
+            else
+            {
+                _activeFlip180 = flip180;
+                if (fresh) ReportFreshFrameTiming(queuedAt, encodeStartedAt);
+            }
+            ReportDrops();
+            ReportDiagnostics();
+            transferred = !envelope.IsEmpty;
+            return envelope;
         }
-        else
-        {
-            _activeFlip180 = flip180;
-            if (fresh) ReportFreshFrameTiming(queuedAt, encodeStartedAt);
-        }
-        ReportDrops();
-        return envelope;
+        finally { if (!transferred) reservation.Dispose(); }
     }
 
-    private ReadOnlyMemory<byte> EncodeActiveFrame(bool flip180)
+    private D215EnvelopeLease EncodeActiveFrame(bool flip180, D215EnvelopeLease reservation, D215FrameDiagnostics? diagnostics)
     {
         ReadOnlySpan<byte> pixels = _active;
         if (flip180)
@@ -174,19 +207,31 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
         }
         for (var i = 0; i < Qualities.Length; i++)
         {
+            var started = diagnostics is not null ? Stopwatch.GetTimestamp() : 0;
+            var outcome = D215EncodeOutcome.UnexpectedException;
+            var outputBytes = 0;
             try
             {
                 var encoder = _encoders[i] ??= _makeEncoder(Qualities[i]);
                 var jpeg = encoder.Encode(pixels);
+                outputBytes = jpeg.Length;
+                outcome = jpeg.IsEmpty ? D215EncodeOutcome.Empty : jpeg.Length > D215Protocol.MaximumJpegBytes
+                    ? D215EncodeOutcome.Oversize : D215EncodeOutcome.Accepted;
                 if (!jpeg.IsEmpty && jpeg.Length <= D215Protocol.MaximumJpegBytes)
-                    return D215Protocol.BuildJpegEnvelope(jpeg);
+                    return reservation.Format(jpeg);
             }
             catch (InvalidOperationException)
             {
+                outcome = D215EncodeOutcome.RejectedException;
                 // An encode failure drops this frame if all configured attempts fail.
             }
+            finally
+            {
+                if (diagnostics is not null)
+                    diagnostics.Attempt(i, outcome, outputBytes, started, Stopwatch.GetTimestamp());
+            }
         }
-        return ReadOnlyMemory<byte>.Empty;
+        return default;
     }
 
     private void ReportFreshFrameTiming(long queuedAt, long encodeStartedAt)
@@ -218,6 +263,13 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
         _lastDropReport = now;
     }
 
+    internal void ReportDiagnostics(bool final = false)
+    {
+        var epoch = EfficiencyDiagnosticOptions.SessionRevision;
+        if (_diagnostics?.Report(Stopwatch.GetTimestamp(), _envelopes.LeasedCapacityBytes, final) is { } line)
+            if (_explicitDiagnostics is not null || (epoch != 0 && epoch == EfficiencyDiagnosticOptions.SessionRevision)) ServiceLog.Info(line);
+    }
+
     public void Dispose()
     {
         // The transport retires this source only after the sole encoding consumer exits.
@@ -226,7 +278,9 @@ internal sealed class D215BgraFrames : ID215FrameSource, IDisposable
             if (_disposed) return;
             _disposed = true;
         }
+        _envelopes.Dispose();
         foreach (var encoder in _encoders) encoder?.Dispose();
+        ReportDiagnostics(final: true);
     }
 
     private sealed class JpegEncoder(int quality) : ID215JpegEncoder

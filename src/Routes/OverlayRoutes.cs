@@ -21,13 +21,14 @@ public static class OverlayRoutes
         // Everything nexus-overlay reconciles against, in one read: a failed
         // read must leave the host's kiosks and widgets exactly as they are,
         // which per-setting reads could not express.
-        app.MapGet("/overlay/state", (HttpContext ctx, IConfigStore store, PanelDeviceRegistry registry, DisplayTopologyService topology, StreamedPanelCoordinator streams, DisplayIdentifyService identify, TokenService tokens) =>
+        app.MapGet("/overlay/state", (HttpContext ctx, IConfigStore store, PanelDeviceRegistry registry, DisplayTopologyService topology, StreamedPanelCoordinator streams, DisplayIdentifyService identify, TokenService tokens, Nexus.Service.Diagnostics.EfficiencyDiagnosticSession efficiency) =>
         {
             if (!ServiceTokenRequests.HasServiceToken(ctx, tokens))
                 return Results.Unauthorized();
             var s = store.Load();
             var state = new OverlayStateResponse
             {
+                Efficiency = efficiency.Snapshot(),
                 AutoLaunch = s.Panel.AutoLaunch,
                 ReserveMonitor = s.Panel.ReserveMonitor,
                 PanelAlwaysOnTop = s.Panel.AlwaysOnTop,

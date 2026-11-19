@@ -24,6 +24,43 @@ public sealed class D215LiveStreamTests
     };
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Retained_envelope_slot_survives_stop_and_uncertain_write_until_actual_native_completion(bool uncertain)
+    {
+        using var pool = new D215EnvelopePool();
+        Assert.True(pool.TryRent(out var reservation));
+        var first = reservation.Format(Convert.FromHexString("FFD8FFD9"));
+        var transport = new FakeTransport { BlockFrame = true, HoldAfterCancellation = true, HoldOnlyFrame = true };
+        var timing = Timing with { WriteTimeout = TimeSpan.FromMilliseconds(uncertain ? 50 : 3000) };
+        var source = new LeasedFrames(first);
+        var stream = new D215LiveStream(new D215Wire(transport, TimeProvider.System, timing), source,
+            () => true, TimeProvider.System, timing);
+        try
+        {
+            await StartAndAwaitFrame(transport, stream);
+            await transport.FrameHeld.Task.WaitAsync(TestTimeout);
+            if (uncertain) await transport.CancellationObserved.Task.WaitAsync(TestTimeout);
+            stream.RequestStop();
+            Assert.False(stream.Completion.IsCompleted);
+            Assert.True(pool.TryRent(out var spareReservation));
+            using var spare = spareReservation.Format([17]);
+            Assert.False(pool.TryRent(out _));
+            Assert.Equal(Convert.FromHexString(Frame), transport.HeldFrame.ToArray());
+            transport.ReleaseFrame.TrySetResult();
+            await stream.Completion.WaitAsync(TestTimeout);
+            Assert.True(pool.TryRent(out var returned));
+            returned.Dispose();
+            Assert.Equal(uncertain, stream.Failure is not null);
+        }
+        finally
+        {
+            transport.ReleaseFrame.TrySetResult();
+            await Abort(stream);
+        }
+    }
+
+    [Theory]
     [InlineData(true, (int)D215ConnectionStatus.WriteTimedOut)]
     [InlineData(false, (int)D215ConnectionStatus.NoResponse)]
     public async Task A_driver_ignoring_cancellation_exposes_the_deadline_before_completion(bool write, int status)
@@ -406,7 +443,19 @@ public sealed class D215LiveStreamTests
         private byte[]? _frame = Convert.FromHexString(Frame);
         internal bool Repeat { get; init; }
         public bool MayRepeat => Repeat;
-        public ReadOnlyMemory<byte> TakeLatestEnvelope() => Interlocked.Exchange(ref _frame, null);
+        public D215EnvelopeLease TakeLatestEnvelope() => D215EnvelopeLease.FromOwned(Interlocked.Exchange(ref _frame, null));
+    }
+
+    private sealed class LeasedFrames(D215EnvelopeLease frame) : ID215FrameSource
+    {
+        private bool _taken;
+        public bool MayRepeat => true;
+        public D215EnvelopeLease TakeLatestEnvelope()
+        {
+            if (_taken) return default;
+            _taken = true;
+            return frame;
+        }
     }
 
     private sealed class FakeTransport : ID215SerialTransport
@@ -415,6 +464,9 @@ public sealed class D215LiveStreamTests
         private readonly Channel<byte[]> _replies = Channel.CreateUnbounded<byte[]>();
         internal bool BlockFrame { get; init; }
         internal bool HoldAfterCancellation { get; init; }
+        internal bool HoldOnlyFrame { get; init; }
+        internal ReadOnlyMemory<byte> HeldFrame { get; private set; }
+        internal TaskCompletionSource FrameHeld { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal bool WriteCancelled { get; private set; }
         internal bool HasWrite => _writes.Reader.TryPeek(out _);
         internal TaskCompletionSource ReleaseFrame { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -425,7 +477,7 @@ public sealed class D215LiveStreamTests
 
         public async ValueTask<int> ReadAsync(Memory<byte> destination, CancellationToken cancellationToken)
         {
-            if (HoldAfterCancellation)
+            if (HoldAfterCancellation && !HoldOnlyFrame)
             {
                 await HoldAsync(cancellationToken);
                 return 0;
@@ -442,6 +494,8 @@ public sealed class D215LiveStreamTests
             Assert.True(_writes.Writer.TryWrite(packet));
             if (BlockFrame && packet == Frame)
             {
+                HeldFrame = source;
+                FrameHeld.TrySetResult();
                 if (HoldAfterCancellation)
                 {
                     await HoldAsync(cancellationToken);

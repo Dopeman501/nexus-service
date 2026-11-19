@@ -27,7 +27,7 @@ using Nexus.Service.Sockets;
 // portal rejects a root caller (can't read its /proc). Must be the very first
 // thing - its stdout (fd 1) carries the raw RGB frame stream, so nothing else
 // (not even a boot-timer line) may write to stdout before it takes over.
-#if LINUX
+#if LINUX && !OFFLINE_SMOKE
 if (args.Length > 0
     && args[0] == Nexus.Service.Lighting.Capture.LinuxScreenCastHelper.Verb)
 {
@@ -35,6 +35,9 @@ if (args.Length > 0
 }
 #endif
 
+#if OFFLINE_SMOKE
+Nexus.Service.Lifecycle.OfflineSmokeHost.Prepare(args);
+#endif
 Nexus.Service.Lifecycle.BootTimer.Mark("process entry");
 
 // Early-exit CLI flags (install/uninstall/tray/--open-app/protocol URLs,
@@ -225,6 +228,10 @@ else if (!serviceMode && !testHost)
     }
 }
 using var _singleInstance = singleInstance;
+// Opt-in numeric diagnostics only; no persisted configuration, device reads or forced GC.
+using var efficiencyMemorySampler = testHost ? null
+    : new Nexus.Service.Diagnostics.EfficiencyMemorySamplerController(Nexus.Service.Platform.ServiceLog.Info);
+efficiencyMemorySampler?.Update();
 Nexus.Service.Lifecycle.BootTimer.Mark("after single-instance mutex");
 
 // TEMPORARY (remove ~2026-07-20 with DataLayoutMigration): migrate the flat data
@@ -356,9 +363,20 @@ var builder = WebApplication.CreateSlimBuilder(new WebApplicationOptions
 {
     Args = args,
     ContentRootPath = exeDir,
-    WebRootPath = ResolveWebRoot(exeDir),
+    WebRootPath =
+#if OFFLINE_SMOKE
+        Path.Combine(exeDir, "wwwroot"),
+#else
+        ResolveWebRoot(exeDir),
+#endif
 });
 Nexus.Service.Lifecycle.BootTimer.Mark("after WebApplication.CreateSlimBuilder");
+builder.Services.AddSingleton(_ => new Nexus.Service.Diagnostics.EfficiencyDiagnosticSession(apply: lease =>
+{
+    Nexus.Service.Diagnostics.EfficiencyDiagnosticOptions.Apply(lease.ServiceGeneration, lease.Revision, lease.RunId, lease.RemainingMs);
+    Nexus.Service.Platform.ServiceLog.Info($"[efficiency-session] localEpoch={Nexus.Service.Diagnostics.EfficiencyDiagnosticOptions.SessionRevision} authority={lease.ServiceGeneration} run={lease.RunId ?? "none"} revision={lease.Revision} active={(lease.NativeActive ? 1 : 0)}");
+    efficiencyMemorySampler?.Update();
+}));
 #if LINUX
 // The host default can outlast a distro's stop timeout, so a wedged hosted-service stop would
 // end in SIGKILL. Stay under the unit's TimeoutStopSec with room for disposal.
@@ -392,7 +410,11 @@ builder.WebHost.ConfigureKestrel(k =>
         return;
     }
 #endif
+#if OFFLINE_SMOKE
+    k.Listen(System.Net.IPAddress.Loopback, servicePort);
+#else
     k.ListenAnyIP(servicePort);
+#endif
     if (localHttpsCertificate is not null)
     {
         k.ListenAnyIP(httpsPort, o => o.UseHttps(localHttpsCertificate));
@@ -540,7 +562,23 @@ if (emitOpenApiPath is not null)
 #endif
 
 // ── Build ──
+#if OFFLINE_SMOKE
+Nexus.Service.Lifecycle.OfflineSmokeHost.Configure(builder.Services);
+#endif
 var app = builder.Build();
+#if OFFLINE_SMOKE
+app.Use(async (context, next) =>
+{
+    context.Response.Headers["X-Nexus-Offline-Smoke"] = "hardware-disabled-probe";
+    // Reject before endpoint binding/DI: even a GET can construct a real hardware provider.
+    if (!Nexus.Service.Lifecycle.OfflineSmokeHost.Allows(context.Request.Method, context.Request.Path.Value))
+    {
+        context.Response.StatusCode = StatusCodes.Status403Forbidden;
+        return;
+    }
+    await next(context);
+});
+#endif
 Nexus.Service.Lifecycle.BootTimer.Mark("after builder.Build()");
 
 // Arm before hosted services start - LhmWarmupService constructs LhmComputer
@@ -734,6 +772,7 @@ app.MapDisplayEndpoints();
 app.MapActivityEndpoints();
 app.MapLifecycleEndpoints();
 app.MapDiagnosticsEndpoints();
+app.MapEfficiencyDiagnosticEndpoints();
 app.MapDiagnosticsHealthEndpoints();
 app.MapAstralEndpoints();
 app.MapMonitoringHistoryEndpoints();

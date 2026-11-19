@@ -22,11 +22,14 @@ internal sealed class LightingAudioTriggerController : IDisposable
     private readonly object _renderGate = new();
     private readonly Func<LightingAudioTriggerLook, IEffect> _build;
     private readonly Action? _resetMedia;
+    private readonly Action<IReadOnlyCollection<string>>? _reconcileMediaDemand;
     private readonly Dictionary<int, IEffect> _effects = new();
     private readonly HashSet<int> _failed = new();
     private readonly Dictionary<int, CanvasBuffer> _frames = new();
     private readonly Dictionary<double, Detection> _detections = new();
     private readonly HashSet<int> _rendered = new();
+    private readonly HashSet<string> _mediaDemand = new(StringComparer.Ordinal);
+    private readonly List<double> _retiredIntensities = new();
     private readonly CanvasBuffer _candidate = new();
     private Configuration _configuration = new(new(), "", "", 0);
     private Sample? _sample;
@@ -39,10 +42,12 @@ internal sealed class LightingAudioTriggerController : IDisposable
     private bool _wasVisible;
     private volatile bool _disposed;
 
-    internal LightingAudioTriggerController(Func<LightingAudioTriggerLook, IEffect> build, Action? resetMedia = null)
+    internal LightingAudioTriggerController(Func<LightingAudioTriggerLook, IEffect> build, Action? resetMedia = null,
+        Action<IReadOnlyCollection<string>>? reconcileMediaDemand = null)
     {
         _build = build;
         _resetMedia = resetMedia;
+        _reconcileMediaDemand = reconcileMediaDemand;
     }
     internal bool Requested => !_disposed && Volatile.Read(ref _configuration).Value is { Enabled: true, Looks.Count: > 0 };
     internal bool CaptureWanted => _running && Requested;
@@ -127,6 +132,7 @@ internal sealed class LightingAudioTriggerController : IDisposable
             AudioTriggerSample? sample = packet is not null && packet.Generation == generation
                 && now >= packet.At && now - packet.At <= AudioTriggerDetector.StaleMs ? packet.Value : null;
             _rendered.Clear();
+            _mediaDemand.Clear();
             _advanced.Clear();
             Advance(config.Value.Intensity);
             if (config.Value.DeviceOverrides is { } overrides)
@@ -137,7 +143,15 @@ internal sealed class LightingAudioTriggerController : IDisposable
                         Advance(intensity);
                 }
             }
-            foreach (var old in _detections.Keys.Where(intensity => !_advanced.Contains(intensity)).ToArray()) _detections.Remove(old);
+            _retiredIntensities.Clear();
+            foreach (var intensity in _detections.Keys)
+                if (!_advanced.Contains(intensity)) _retiredIntensities.Add(intensity);
+            foreach (var old in _retiredIntensities) _detections.Remove(old);
+            _reconcileMediaDemand?.Invoke(_mediaDemand);
+            foreach (var index in _rendered)
+                if (!_failed.Contains(index)) Render(index, config.Value, renderTick);
+            foreach (var detection in _detections.Values)
+                if (detection.State.Index is { } index && _frames.TryGetValue(index, out var frame)) detection.Canvas = frame;
             _anyVisible = allowed && CaptureWanted && _detections.Values.Any(detection => detection.Canvas is not null);
             var visible = AnyCanvas;
             var changed = visible != wasVisible || configurationChanged;
@@ -154,8 +168,9 @@ internal sealed class LightingAudioTriggerController : IDisposable
                     ? AudioTriggerDetector.Advance(detection.State, config.Value, sample, now, intensity: intensity)
                     : AudioTriggerDetector.Initial;
                 if (detection.State.Index is not { } index) { detection.Canvas = null; return; }
-                if (!_failed.Contains(index) && _rendered.Add(index)) Render(index, config.Value, renderTick);
-                if (_frames.TryGetValue(index, out var frame)) detection.Canvas = frame;
+                _rendered.Add(index);
+                var look = config.Value.Looks[index];
+                if (look.Mode == "media" && look.MediaId is { } id) _mediaDemand.Add(id);
             }
         }
     }

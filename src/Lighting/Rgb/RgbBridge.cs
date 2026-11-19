@@ -39,7 +39,7 @@ namespace Nexus.Service.Lighting.Rgb;
 /// re-init after sleep. The bridge transparently reconnects when the TCP socket
 /// drops by trying TryConnectAsync on the next frame tick.
 /// </summary>
-public sealed class RgbBridge : IDisposable
+public sealed partial class RgbBridge : IDisposable
 {
     private static readonly TimeSpan ReconnectCooldown = TimeSpan.FromSeconds(5);
     /// <summary>Connect retry period while a daemon inside <see cref="DaemonWarmup"/> is not accepting yet.</summary>
@@ -125,6 +125,14 @@ public sealed class RgbBridge : IDisposable
     private bool _watchdogGaveUp;
     /// <summary>Test stand-in for both the watchdog's uptime and the reconnect's time since spawn (the process manager is sealed).</summary>
     internal Func<TimeSpan>? DaemonUptimeProbe { get; set; }
+    /// <summary>Isolated owner tests replace process/config redetection, never the live daemon.</summary>
+    internal Action<string, bool>? RedetectOverride { get; set; }
+    internal Action<string>? BounceOverride { get; set; }
+    internal Task? RedetectionTask { get; private set; }
+    internal Action? RedetectionProcessStopOverride { get; set; }
+    internal Action? RedetectionProcessStartOverride { get; set; }
+    internal Task? RedetectionBounceTask { get; private set; }
+    internal Task? LegacyBounceTask { get; private set; }
     private long _lastBounceTicks;         // DateTime.UtcNow.Ticks; updated via Interlocked
     // Last detection activity (our re-detect request, DETECTION_STARTED/PROGRESS); 0 once COMPLETE arrives. UtcNow ticks, Interlocked.
     private long _detectionActivityTicks;
@@ -139,6 +147,7 @@ public sealed class RgbBridge : IDisposable
     // A re-detect asked for while a pass was running, which a rescan would skip; replayed on COMPLETE. Guarded by _lock.
     private string? _deferredRedetectReason;
     private bool _deferredDetectorsChanged;
+    private RefreshOwner? _deferredRedetectOwner;
     // Completed and replaced on every committed list, so a USB arrival can wait for the device to show up.
     private TaskCompletionSource _listCommitted = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private int _refreshPending;           // 0 = idle, 1 = refresh scheduled/running
@@ -346,11 +355,12 @@ public sealed class RgbBridge : IDisposable
     // as it was, so the lighting views are told here when the refresh did not already announce it.
     private async Task RefreshAfterContributorChangeAsync()
     {
+        var owner = CaptureRefreshOwner();
         var before = _frameIdSignature;
         await RefreshDevicesAsync().ConfigureAwait(false);
         if (_frameIdSignature == before)
         {
-            DeviceSetChanged?.Invoke();
+            PublishRefresh(owner, () => DeviceSetChanged?.Invoke());
         }
     }
 
@@ -502,6 +512,7 @@ public sealed class RgbBridge : IDisposable
         Action? deviceListHandler;
         CancellationTokenSource? cts;
 
+        lock (_refreshPublicationGate)
         lock (_lock)
         {
             if (!_active)
@@ -781,16 +792,9 @@ public sealed class RgbBridge : IDisposable
     {
         if (physicalIndex < 0 || zoneIndex < 0 || newSize < 0)
             return;
-        _pendingZoneResizes.Enqueue((physicalIndex, zoneIndex, newSize));
-        if (IsActive && _controller.IsConnected)
-        {
-            _ = Task.Run(async () =>
-            {
-                try
-                { await RefreshDevicesAsync().ConfigureAwait(false); }
-                catch (Exception ex) { Console.Error.WriteLine($"[rgb-bridge] resize-triggered refresh failed: {ex.Message}"); }
-            });
-        }
+        string? stableId;
+        lock (_lock) stableId = FindDevice(_devices, physicalIndex)?.StableId;
+        if (stableId is not null) RequestZoneResizeById(stableId, zoneIndex, newSize);
     }
 
     /// <summary>
@@ -817,8 +821,20 @@ public sealed class RgbBridge : IDisposable
     /// connection, the daemon refuses, or the previous pass never completed
     /// (a wedged pass makes every later rescan a no-op).
     /// </summary>
-    private void Redetect(string reason, bool detectorsChanged)
+    private void Redetect(string reason, bool detectorsChanged, RefreshOwner? owner = null)
     {
+        if (owner is { } scoped)
+            PublishRefresh(scoped, () => RedetectCurrent(reason, detectorsChanged, scoped), requireConnected: false);
+        else RedetectCurrent(reason, detectorsChanged, null);
+    }
+
+    private void RedetectCurrent(string reason, bool detectorsChanged, RefreshOwner? owner)
+    {
+        if (RedetectOverride is { } redetect)
+        {
+            redetect(reason, detectorsChanged);
+            return;
+        }
         if (RefuseRestartDuringShutdown(reason))
         {
             return;
@@ -839,7 +855,7 @@ public sealed class RgbBridge : IDisposable
         var requested = Interlocked.Read(ref _redetectRequestedTicks);
         if (!_controller.IsConnected || (requested != 0 && DateTime.UtcNow.Ticks - requested > DetectionStallLimit.Ticks))
         {
-            BounceSubprocess(reason);
+            BounceForRedetection(reason, owner);
             return;
         }
         if (DetectionInProgress())
@@ -848,8 +864,11 @@ public sealed class RgbBridge : IDisposable
             // read the detector settings before this change.
             lock (_lock)
             {
+                _deferredDetectorsChanged = detectorsChanged
+                    || (_deferredRedetectReason is not null && _deferredDetectorsChanged
+                        && (_deferredRedetectOwner is null || OwnsRefreshScope(_deferredRedetectOwner.Value)));
                 _deferredRedetectReason = reason;
-                _deferredDetectorsChanged |= detectorsChanged;
+                _deferredRedetectOwner = owner;
             }
             ServiceLog.Info($"[rgb-bridge] re-detect ({reason}) deferred until the running detection completes");
             return;
@@ -866,7 +885,12 @@ public sealed class RgbBridge : IDisposable
         ServiceLog.Info($"[rgb-bridge] re-detecting in place ({reason})");
         MarkDetectionActivity();
         Interlocked.Exchange(ref _redetectRequestedTicks, DateTime.UtcNow.Ticks);
-        _ = Task.Run(async () =>
+        if (owner is { } refreshOwner)
+        {
+            RedetectionTask = Task.Run(() => RunRefreshRedetectionAsync(reason, detectorsChanged, refreshOwner));
+            return;
+        }
+        RedetectionTask = Task.Run(async () =>
         {
             try
             {
@@ -990,12 +1014,15 @@ public sealed class RgbBridge : IDisposable
         Interlocked.Exchange(ref _redetectRequestedTicks, 0);
         string? deferred;
         bool deferredDetectors;
+        RefreshOwner? deferredOwner;
         lock (_lock)
         {
             deferred = _deferredRedetectReason;
             deferredDetectors = _deferredDetectorsChanged;
+            deferredOwner = _deferredRedetectOwner;
             _deferredRedetectReason = null;
             _deferredDetectorsChanged = false;
+            _deferredRedetectOwner = null;
         }
         if (!IsActive)
         {
@@ -1003,7 +1030,7 @@ public sealed class RgbBridge : IDisposable
         }
         if (deferred is not null && !OsShuttingDown())
         {
-            Redetect(deferred, deferredDetectors);
+            Redetect(deferred, deferredDetectors, deferredOwner);
             return;
         }
         ScheduleRefresh();
@@ -1033,6 +1060,7 @@ public sealed class RgbBridge : IDisposable
 
     private void BounceSubprocess(string reason)
     {
+        if (BounceOverride is { } bounce) { bounce(reason); return; }
         if (RefuseRestartDuringShutdown(reason))
         {
             return;
@@ -1073,23 +1101,8 @@ public sealed class RgbBridge : IDisposable
         MarkDetectionActivity();
         Interlocked.Exchange(ref _redetectRequestedTicks, 0);
         Interlocked.Exchange(ref _daemonFailures, 0);
-        _ = Task.Run(async () =>
-        {
-            _proc.Stop();
-            try
-            { await _controller.DisconnectAsync().ConfigureAwait(false); }
-            catch { }
-            await Task.Delay(500).ConfigureAwait(false);
-            _proc.Start();
-            // The relaunch rewrote the overrides and detects from scratch.
-            lock (_lock)
-            {
-                _deferredRedetectReason = null;
-                _deferredDetectorsChanged = false;
-            }
-            ServiceLog.Info($"[rgb-bridge] bounce ({reason}): daemon restarted, reconnecting");
-            await EnsureConnectedAsync().ConfigureAwait(false);
-        });
+        var bounceOwner = CaptureRefreshOwner();
+        LegacyBounceTask = Task.Run(() => BounceForRefreshAsync(reason, bounceOwner));
     }
 
     /// <summary>One connect/refresh failure; past the threshold and outside the floor and per-window cap, bounces the daemon.</summary>
@@ -1190,12 +1203,16 @@ public sealed class RgbBridge : IDisposable
     /// seen devices to direct mode. Idempotent and rate-limited so a flood of
     /// frame ticks doesn't spam connect attempts.
     /// </summary>
-    private async Task EnsureConnectedAsync()
+    private Task EnsureConnectedAsync() => EnsureConnectedOwnedAsync(null);
+
+    private async Task EnsureConnectedOwnedAsync(RefreshOwner? expectedOwner)
     {
         if (!IsActive)
         {
             return;
         }
+        var connectionOwner = expectedOwner ?? CaptureRefreshOwner();
+        if (!OwnsRefreshScope(connectionOwner)) return;
 
         // Atomic cooldown: only the thread that swaps the timestamp gets to attempt.
         var now = DateTime.UtcNow.Ticks;
@@ -1218,29 +1235,40 @@ public sealed class RgbBridge : IDisposable
             // pushed until a refresh commits this daemon's own list. A restarted
             // daemon reuses ids from 0, so the committed id list is reset too or
             // the poll would read the new list as unchanged.
-            _physBuffers.Clear();
+            lock (_refreshPublicationGate)
             lock (_lock)
             {
+                if (!OwnsRefreshLifecycle(connectionOwner)
+                    || (expectedOwner is not null && !OwnsRefreshScope(connectionOwner))) return;
+                _physBuffers.Clear();
                 _committedAddresses = Array.Empty<int>();
                 _metadataRetry.Reset();
+                connectionOwner = CaptureRefreshOwner();
             }
             bool connected;
             try
-            { connected = await _controller.TryConnectAsync().ConfigureAwait(false); }
+            { connected = await _controller.TryConnectAsync(connectionOwner.Cancellation).ConfigureAwait(false); }
             catch (Exception ex)
             {
-                RecordDaemonFailure("connect", $"{ex.GetType().Name}: {ex.Message}");
+                if (!OwnsRefreshLifecycle(connectionOwner)) return;
+                connectionOwner = connectionOwner with { Generation = MetadataConnectionGeneration };
+                PublishRefreshFailure(connectionOwner, () => RecordDaemonFailure("connect", $"{ex.GetType().Name}: {ex.Message}"));
                 return;
             }
+            if (!OwnsRefreshLifecycle(connectionOwner)) return;
+            connectionOwner = connectionOwner with { Generation = MetadataConnectionGeneration };
             if (!connected)
             {
+                PublishRefreshFailure(connectionOwner, () =>
+                {
                 if (!_connectFailureLogged)
                 {
                     _connectFailureLogged = true;
                     ServiceLog.Info($"[rgb-bridge] connect to daemon failed (running={_proc.IsRunning}, spawned {sinceSpawn.TotalSeconds:F1}s ago); retrying");
                 }
                 RecordDaemonFailure("connect", "no SDK handshake");
-                if (starting)
+                });
+                if (starting && OwnsRefreshLifecycle(connectionOwner))
                 {
                     // A refused connect inside warm-up raced the daemon's bind; poll until it accepts.
                     _ = Task.Run(async () =>
@@ -1251,8 +1279,6 @@ public sealed class RgbBridge : IDisposable
                 }
                 return;
             }
-            _connectFailureLogged = false;
-
             // Subprocess restarted (crash recovery or explicit bounce): every
             // controller in the new OpenRGB instance is in its cold-start mode.
             // Clear _directModeApplied so RefreshDevicesAsync re-issues
@@ -1260,13 +1286,14 @@ public sealed class RgbBridge : IDisposable
             // re-issuing, the controller stays in whatever hardware preset
             // mode it boots into (typically a rainbow/breathing effect) and
             // silently ignores per-LED UpdateLEDs writes.
-            lock (_lock)
+            if (!PublishRefresh(connectionOwner, () =>
             {
-                _directModeApplied = new();
-            }
+                _connectFailureLogged = false;
+                lock (_lock) _directModeApplied = new();
+            })) return;
         }
 
-        await RefreshDevicesAsync().ConfigureAwait(false);
+        if (IsRefreshCurrent(connectionOwner)) await RefreshDevicesAsync().ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1280,10 +1307,11 @@ public sealed class RgbBridge : IDisposable
             return;
         }
 
+        var refreshOwner = CaptureRefreshOwner();
         await _refreshSemaphore.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (!IsActive || !_controller.IsConnected)
+            if (!IsRefreshCurrent(refreshOwner))
             {
                 return;
             }
@@ -1305,12 +1333,12 @@ public sealed class RgbBridge : IDisposable
             }
 
             IReadOnlyList<RgbDevice> devices;
-            long metadataScope;
-            lock (_lock) { metadataScope = _metadataRetry.Scope; }
+            var metadataScope = refreshOwner.Scope;
+            if (!IsRefreshCurrent(refreshOwner)) return;
             try
             {
-                devices = await _controller.GetDevicesAsync().ConfigureAwait(false);
-                PinFallbackIds(devices);
+                devices = await _controller.GetDevicesAsync(refreshOwner.Cancellation).ConfigureAwait(false);
+                if (!PublishRefresh(refreshOwner, () => PinFallbackIds(devices))) return;
             }
             catch (OpenRgbMetadataBusyException busy)
             {
@@ -1320,22 +1348,23 @@ public sealed class RgbBridge : IDisposable
             catch (Exception ex)
             {
                 // The controller dropped the socket on the way out; the next tick reconnects.
-                RecordDaemonFailure("refresh", ex.Message);
+                PublishRefreshFailure(refreshOwner, () => RecordDaemonFailure("refresh", ex.Message));
                 return;
             }
 
             // Apply any queued or persisted motherboard zone resizes BEFORE the
             // device list becomes the engine's source of truth. Re-fetch the
             // list afterwards so zone LED counts reflect the new sizes.
-            var resizeAttempts = await ApplyZoneResizesAsync(devices).ConfigureAwait(false);
+            var resizeAttempts = await ApplyZoneResizesAsync(devices, refreshOwner).ConfigureAwait(false);
+            if (!IsRefreshCurrent(refreshOwner)) return;
             var resizeTook = false;
             if (resizeAttempts.Count > 0)
             {
                 var refetched = false;
                 try
                 {
-                    devices = await _controller.GetDevicesAsync().ConfigureAwait(false);
-                    PinFallbackIds(devices);
+                    devices = await _controller.GetDevicesAsync(refreshOwner.Cancellation).ConfigureAwait(false);
+                    if (!PublishRefresh(refreshOwner, () => PinFallbackIds(devices))) return;
                     refetched = true;
                 }
                 catch (OpenRgbMetadataBusyException busy)
@@ -1345,14 +1374,18 @@ public sealed class RgbBridge : IDisposable
                 }
                 catch (Exception ex)
                 {
+                    if (!OwnsRefreshScope(refreshOwner)) return;
                     Console.Error.WriteLine($"[rgb-bridge] re-fetch after resize failed: {ex.Message}");
                 }
                 // The pre-resize list reports every attempt as failed, and the
                 // transient empty the block below absorbs reports -1.
                 if (refetched && devices.Count > 0)
                 {
-                    LogZoneResizeOutcomes(resizeAttempts, devices);
-                    resizeTook = AnyResizeTook(resizeAttempts, devices);
+                    if (!PublishRefresh(refreshOwner, () =>
+                    {
+                        LogZoneResizeOutcomes(resizeAttempts, devices);
+                        resizeTook = AnyResizeTook(resizeAttempts, devices);
+                    })) return;
                 }
             }
 
@@ -1364,6 +1397,7 @@ public sealed class RgbBridge : IDisposable
             var settingsSnapshot = _store.Load();
             foreach (var dev in devices)
             {
+                RequireRefreshCurrent(refreshOwner);
                 bool isNew;
                 lock (_lock)
                 {
@@ -1382,251 +1416,267 @@ public sealed class RgbBridge : IDisposable
 
                 try
                 {
-                    await _controller.SetDirectModeAsync(dev).ConfigureAwait(false);
-                    lock (_lock)
+                    await SetRefreshDirectModeAsync(refreshOwner, dev).ConfigureAwait(false);
+                    if (!PublishRefresh(refreshOwner, () =>
                     {
-                        _directModeApplied.Add(dev.Address);
-                    }
+                        lock (_lock) _directModeApplied.Add(dev.Address);
+                    })) return;
                 }
+                catch (RefreshRetiredException) { return; }
                 catch (Exception ex)
                 {
+                    if (!OwnsRefreshScope(refreshOwner)) return;
                     ServiceLog.Warn($"[rgb-bridge] SetDirectMode controller {dev.Address} failed: {ex.Message}");
                 }
             }
 
-            IReadOnlyList<RgbDevice> finalList = devices;
-            var inDetection = DetectionInProgress();
-            lock (_lock)
+            PublishRefresh(refreshOwner, () =>
             {
-                _devices = finalList;
-                var addresses = new int[finalList.Count];
-                for (var i = 0; i < addresses.Length; i++)
+                IReadOnlyList<RgbDevice> finalList = devices;
+                var inDetection = DetectionInProgress();
+                lock (_lock)
                 {
-                    addresses[i] = finalList[i].Address;
-                }
-                _committedAddresses = addresses;
-                // Ids are never reused within a daemon run, so ones gone from the list are dead.
-                _directModeApplied.IntersectWith(addresses);
-            }
-            Interlocked.Exchange(ref _listCommitted, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
-            // After the commit, so the refetch this triggers reads the new count.
-            if (resizeTook)
-            {
-                ZoneResizeApplied?.Invoke();
-            }
-
-            // Move any legacy per-device state on a split motherboard onto its
-            // ARGB header ids before this refresh resolves partitions and
-            // builds frames below. OpenRgbLightingDeviceProvider.GetStructures
-            // runs the same migration, but only when some other caller asks
-            // for structures first - too late once BuildOrReuseFrame has
-            // already cached a frame for the unmigrated shape.
-            if (SplitMotherboardDeviceMigration.NeedsApply(settingsSnapshot, finalList))
-            {
-                _store.Update(s => SplitMotherboardDeviceMigration.Apply(s, finalList));
-                settingsSnapshot = _store.Load();
-            }
-
-            // Settled commits reconcile detector exclusions: a device the user
-            // fully un-controlled gets snapshotted + denylisted (and re-detected
-            // to release it); a re-controlled one gets its exclusion lifted the
-            // same way.
-            if (!inDetection)
-            {
-                LogSettledDevices(finalList);
-                ReconcileDetectorExclusions(finalList, settingsSnapshot);
-            }
-
-            // Sync engine's DeviceFrame array with the current hardware list. For a
-            // device that's still present at the same LED count, we REUSE the existing
-            // DeviceFrame instance - its LED buffer keeps its last rendered colors so
-            // the device doesn't flash black for one tick while the engine re-samples.
-            // Only new or reshaped devices get a fresh DeviceFrame.
-            //
-            // One frame per zone of the device's partition. With no custom
-            // partition this is the legacy emission: split motherboards get
-            // one frame per ARGB header, everything else one whole-device
-            // frame. Custom zones are contiguous device-space runs (validator
-            // rule), so offset + count still describes each frame's slice of
-            // the physical buffer.
-            var existingFrames = _engine.Devices;
-            var framesList = new List<DeviceFrame>(devices.Count);
-            var layouts = settingsSnapshot.Lighting.DeviceLayouts;
-            int logicalOrdinal = 0;
-            int cardSlot = 0;
-            int stripSlot = 0;
-            for (int i = 0; i < devices.Count; i++)
-            {
-                var framesBefore = framesList.Count;
-                var ordinalBefore = logicalOrdinal;
-                var cardBefore = cardSlot;
-                var stripBefore = stripSlot;
-                try
-                {
-                    var d = devices[i];
-                    if (IsOwnedByFirstParty(d)) continue;
-                    // Excluded devices render from their persisted snapshot; a live
-                    // entry fetched before the exclusion's re-detect must not occupy
-                    // an engine frame or a canvas slot.
-                    if (settingsSnapshot.Devices.OpenRgbDetectorExclusions.ContainsKey(d.StableId)) continue;
-                    var baseId = d.StableId;
-
-                    // A split motherboard is one device per ARGB header, so each
-                    // port resolves its OWN partition: a chain wired to one header
-                    // emits a frame per product while the others keep their single
-                    // frame. Resolving the board instead would find no partition
-                    // (chains are stored under the port id) and every chained card
-                    // would go frameless - visible as cards that never light.
-                    if (OpenRgbZoneSupport.IsSplitMotherboard(d))
+                    _devices = finalList;
+                    var addresses = new int[finalList.Count];
+                    for (var i = 0; i < addresses.Length; i++)
                     {
-                        foreach (var port in OpenRgbZoneSupport.BuildStructures(d, settingsSnapshot))
+                        addresses[i] = finalList[i].Address;
+                    }
+                    _committedAddresses = addresses;
+                    // Ids are never reused within a daemon run, so ones gone from the list are dead.
+                    _directModeApplied.IntersectWith(addresses);
+                }
+                Interlocked.Exchange(ref _listCommitted, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
+                // After the commit, so the refetch this triggers reads the new count.
+                if (resizeTook)
+                {
+                    ZoneResizeApplied?.Invoke();
+                    RequireRefreshCurrent(refreshOwner);
+                }
+
+                // Move any legacy per-device state on a split motherboard onto its
+                // ARGB header ids before this refresh resolves partitions and
+                // builds frames below. OpenRgbLightingDeviceProvider.GetStructures
+                // runs the same migration, but only when some other caller asks
+                // for structures first - too late once BuildOrReuseFrame has
+                // already cached a frame for the unmigrated shape.
+                if (SplitMotherboardDeviceMigration.NeedsApply(settingsSnapshot, finalList))
+                {
+                    _store.Update(s => SplitMotherboardDeviceMigration.Apply(s, finalList));
+                    RequireRefreshCurrent(refreshOwner);
+                    settingsSnapshot = _store.Load();
+                }
+
+                // Settled commits reconcile detector exclusions: a device the user
+                // fully un-controlled gets snapshotted + denylisted (and re-detected
+                // to release it); a re-controlled one gets its exclusion lifted the
+                // same way.
+                if (!inDetection)
+                {
+                    LogSettledDevices(finalList);
+                    ReconcileDetectorExclusions(finalList, settingsSnapshot, refreshOwner);
+                    RequireRefreshCurrent(refreshOwner);
+                }
+
+                // Sync engine's DeviceFrame array with the current hardware list. For a
+                // device that's still present at the same LED count, we REUSE the existing
+                // DeviceFrame instance - its LED buffer keeps its last rendered colors so
+                // the device doesn't flash black for one tick while the engine re-samples.
+                // Only new or reshaped devices get a fresh DeviceFrame.
+                //
+                // One frame per zone of the device's partition. With no custom
+                // partition this is the legacy emission: split motherboards get
+                // one frame per ARGB header, everything else one whole-device
+                // frame. Custom zones are contiguous device-space runs (validator
+                // rule), so offset + count still describes each frame's slice of
+                // the physical buffer.
+                var existingFrames = _engine.Devices;
+                var framesList = new List<DeviceFrame>(devices.Count);
+                var layouts = settingsSnapshot.Lighting.DeviceLayouts;
+                int logicalOrdinal = 0;
+                int cardSlot = 0;
+                int stripSlot = 0;
+                for (int i = 0; i < devices.Count; i++)
+                {
+                    var framesBefore = framesList.Count;
+                    var ordinalBefore = logicalOrdinal;
+                    var cardBefore = cardSlot;
+                    var stripBefore = stripSlot;
+                    try
+                    {
+                        var d = devices[i];
+                        if (IsOwnedByFirstParty(d)) continue;
+                        // Excluded devices render from their persisted snapshot; a live
+                        // entry fetched before the exclusion's re-detect must not occupy
+                        // an engine frame or a canvas slot.
+                        if (settingsSnapshot.Devices.OpenRgbDetectorExclusions.ContainsKey(d.StableId)) continue;
+                        var baseId = d.StableId;
+
+                        // A split motherboard is one device per ARGB header, so each
+                        // port resolves its OWN partition: a chain wired to one header
+                        // emits a frame per product while the others keep their single
+                        // frame. Resolving the board instead would find no partition
+                        // (chains are stored under the port id) and every chained card
+                        // would go frameless - visible as cards that never light.
+                        if (OpenRgbZoneSupport.IsSplitMotherboard(d))
                         {
-                            // A chain's slices are in the port's EFFECTIVE count,
-                            // which only equals the hardware count once the header
-                            // accepted the RESIZEZONE. On one that ignores it (the
-                            // 12V case) the later links would otherwise resolve
-                            // past this header and write the next one's LEDs, so
-                            // the port's own region is a hard wall.
-                            var portEnd = port.FrameBaseOffset + port.Segments[0].FrameLedCount;
-                            foreach (var portZone in Nexus.Service.Lighting.Zones.ZoneResolution.Resolve(port, settingsSnapshot))
+                            foreach (var port in OpenRgbZoneSupport.BuildStructures(d, settingsSnapshot))
                             {
-                                var frameOffset = Nexus.Service.Lighting.Zones.ZoneResolution.FrameOffset(port, portZone);
-                                BuildOrReuseFrame(portZone.Id, d, physicalIndex: d.Address,
-                                    zoneIndex: portZone.IsDefault
-                                        ? portZone.LegacyZoneIndex
-                                        : Nexus.Service.Lighting.Zones.ZoneResolution.WholeResizableSegment(port, portZone, settingsSnapshot),
-                                    zoneOffset: Math.Min(frameOffset, portEnd),
-                                    zoneLedCount: Math.Max(0, Math.Min(portZone.FrameLedCount, portEnd - frameOffset)),
-                                    existingFrames, layouts, stripSlot, logicalOrdinal, framesList,
-                                    isStrip: true, settingsSnapshot, port, portZone);
-                                stripSlot++;
-                                logicalOrdinal++;
+                                // A chain's slices are in the port's EFFECTIVE count,
+                                // which only equals the hardware count once the header
+                                // accepted the RESIZEZONE. On one that ignores it (the
+                                // 12V case) the later links would otherwise resolve
+                                // past this header and write the next one's LEDs, so
+                                // the port's own region is a hard wall.
+                                var portEnd = port.FrameBaseOffset + port.Segments[0].FrameLedCount;
+                                foreach (var portZone in Nexus.Service.Lighting.Zones.ZoneResolution.Resolve(port, settingsSnapshot))
+                                {
+                                    var frameOffset = Nexus.Service.Lighting.Zones.ZoneResolution.FrameOffset(port, portZone);
+                                    BuildOrReuseFrame(portZone.Id, d, physicalIndex: d.Address,
+                                        zoneIndex: portZone.IsDefault
+                                            ? portZone.LegacyZoneIndex
+                                            : Nexus.Service.Lighting.Zones.ZoneResolution.WholeResizableSegment(port, portZone, settingsSnapshot),
+                                        zoneOffset: Math.Min(frameOffset, portEnd),
+                                        zoneLedCount: Math.Max(0, Math.Min(portZone.FrameLedCount, portEnd - frameOffset)),
+                                        existingFrames, layouts, stripSlot, logicalOrdinal, framesList,
+                                        isStrip: true, settingsSnapshot, port, portZone);
+                                    stripSlot++;
+                                    logicalOrdinal++;
+                                }
                             }
+                            continue;
                         }
+
+                        var structure = OpenRgbZoneSupport.BuildStructure(d, settingsSnapshot);
+                        var zones = Nexus.Service.Lighting.Zones.ZoneResolution.Resolve(structure, settingsSnapshot);
+                        var isDefault = zones.Count > 0 && zones[0].IsDefault;
+
+                        if (isDefault)
+                        {
+                            BuildOrReuseFrame(baseId, d, physicalIndex: d.Address, zoneIndex: -1, zoneOffset: 0, zoneLedCount: d.LedCount,
+                                existingFrames, layouts, cardSlot, logicalOrdinal, framesList, isStrip: false, settingsSnapshot,
+                                structure, zones[0]);
+                            cardSlot++;
+                            logicalOrdinal++;
+                            continue;
+                        }
+
+                        foreach (var zone in zones)
+                        {
+                            var frameOffset = Nexus.Service.Lighting.Zones.ZoneResolution.FrameOffset(structure, zone);
+                            var wholeSegment = Nexus.Service.Lighting.Zones.ZoneResolution.WholeResizableSegment(structure, zone, settingsSnapshot);
+                            BuildOrReuseFrame(zone.Id, d, physicalIndex: d.Address, zoneIndex: wholeSegment, zoneOffset: frameOffset,
+                                zoneLedCount: zone.FrameLedCount, existingFrames, layouts,
+                                cardSlot, logicalOrdinal, framesList,
+                                isStrip: false, settingsSnapshot, structure, zone);
+                            cardSlot++;
+                            logicalOrdinal++;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // One device with a malformed shape (a keyboard reporting a garbage zone size) must not
+                        // abort the pass: every other OpenRGB and first-party frame would stay unseeded.
+                        framesList.RemoveRange(framesBefore, framesList.Count - framesBefore);
+                        logicalOrdinal = ordinalBefore;
+                        cardSlot = cardBefore;
+                        stripSlot = stripBefore;
+                        ServiceLog.Warn($"[rgb-bridge] skipped device '{devices[i].Name}' ({devices[i].StableId}): {ex.GetType().Name}: {ex.Message}");
+                    }
+                }
+
+                var bridgeFrameIds = new HashSet<string>(framesList.Count, StringComparer.Ordinal);
+                foreach (var f in framesList)
+                {
+                    bridgeFrameIds.Add(f.Id);
+                }
+                _bridgeFrameIds = bridgeFrameIds;
+
+                // Pre-resolve the zone layout of contributor devices that expose
+                // structures (keeb) so each contributed frame's user overrides
+                // resolve through its zone's segment slices.
+                List<(Nexus.Service.Lighting.Zones.DeviceStructure structure, IReadOnlyList<Nexus.Service.Lighting.Zones.ResolvedZone> zones)>? contributorZones = null;
+                foreach (var contributor in _frameContributors)
+                {
+                    RequireRefreshCurrent(refreshOwner);
+                    if (contributor is not Nexus.Service.Lighting.Zones.IDeviceStructureSource source)
                         continue;
-                    }
-
-                    var structure = OpenRgbZoneSupport.BuildStructure(d, settingsSnapshot);
-                    var zones = Nexus.Service.Lighting.Zones.ZoneResolution.Resolve(structure, settingsSnapshot);
-                    var isDefault = zones.Count > 0 && zones[0].IsDefault;
-
-                    if (isDefault)
+                    foreach (var s in source.GetStructures())
                     {
-                        BuildOrReuseFrame(baseId, d, physicalIndex: d.Address, zoneIndex: -1, zoneOffset: 0, zoneLedCount: d.LedCount,
-                            existingFrames, layouts, cardSlot, logicalOrdinal, framesList, isStrip: false, settingsSnapshot,
-                            structure, zones[0]);
-                        cardSlot++;
-                        logicalOrdinal++;
-                        continue;
+                        RequireRefreshCurrent(refreshOwner);
+                        (contributorZones ??= new()).Add((s, Nexus.Service.Lighting.Zones.ZoneResolution.Resolve(s, settingsSnapshot)));
                     }
-
-                    foreach (var zone in zones)
-                    {
-                        var frameOffset = Nexus.Service.Lighting.Zones.ZoneResolution.FrameOffset(structure, zone);
-                        var wholeSegment = Nexus.Service.Lighting.Zones.ZoneResolution.WholeResizableSegment(structure, zone, settingsSnapshot);
-                        BuildOrReuseFrame(zone.Id, d, physicalIndex: d.Address, zoneIndex: wholeSegment, zoneOffset: frameOffset,
-                            zoneLedCount: zone.FrameLedCount, existingFrames, layouts,
-                            cardSlot, logicalOrdinal, framesList,
-                            isStrip: false, settingsSnapshot, structure, zone);
-                        cardSlot++;
-                        logicalOrdinal++;
-                    }
+                    RequireRefreshCurrent(refreshOwner);
                 }
-                catch (Exception ex)
+
+                // Append device frames contributed by non-OpenRGB lighting
+                // subsystems (NP50 and other hubs). They start at the next ordinal
+                // so SerializeAndBroadcast's per-device Index space stays packed
+                // and SampleDevicesFromCanvas processes them in one pass.
+                // Each contributed frame then gets the resolver stack applied
+                // (provider defaults -> applied mapping -> user deltas) so custom
+                // layouts survive topology rebuilds; structure-authored segment
+                // defaults seed zone-backed frames, and frame-authored UVs are
+                // snapshotted as the pristine baseline for the rest.
+                foreach (var contributor in _frameContributors)
                 {
-                    // One device with a malformed shape (a keyboard reporting a garbage zone size) must not
-                    // abort the pass: every other OpenRGB and first-party frame would stay unseeded.
-                    framesList.RemoveRange(framesBefore, framesList.Count - framesBefore);
-                    logicalOrdinal = ordinalBefore;
-                    cardSlot = cardBefore;
-                    stripSlot = stripBefore;
-                    ServiceLog.Warn($"[rgb-bridge] skipped device '{devices[i].Name}' ({devices[i].StableId}): {ex.GetType().Name}: {ex.Message}");
-                }
-            }
-
-            var bridgeFrameIds = new HashSet<string>(framesList.Count, StringComparer.Ordinal);
-            foreach (var f in framesList)
-            {
-                bridgeFrameIds.Add(f.Id);
-            }
-            _bridgeFrameIds = bridgeFrameIds;
-
-            // Pre-resolve the zone layout of contributor devices that expose
-            // structures (keeb) so each contributed frame's user overrides
-            // resolve through its zone's segment slices.
-            List<(Nexus.Service.Lighting.Zones.DeviceStructure structure, IReadOnlyList<Nexus.Service.Lighting.Zones.ResolvedZone> zones)>? contributorZones = null;
-            foreach (var contributor in _frameContributors)
-            {
-                if (contributor is not Nexus.Service.Lighting.Zones.IDeviceStructureSource source)
-                    continue;
-                foreach (var s in source.GetStructures())
-                {
-                    (contributorZones ??= new()).Add((s, Nexus.Service.Lighting.Zones.ZoneResolution.Resolve(s, settingsSnapshot)));
-                }
-            }
-
-            // Append device frames contributed by non-OpenRGB lighting
-            // subsystems (NP50 and other hubs). They start at the next ordinal
-            // so SerializeAndBroadcast's per-device Index space stays packed
-            // and SampleDevicesFromCanvas processes them in one pass.
-            // Each contributed frame then gets the resolver stack applied
-            // (provider defaults -> applied mapping -> user deltas) so custom
-            // layouts survive topology rebuilds; structure-authored segment
-            // defaults seed zone-backed frames, and frame-authored UVs are
-            // snapshotted as the pristine baseline for the rest.
-            foreach (var contributor in _frameContributors)
-            {
-                var extra = contributor.BuildFrames(framesList.Count);
-                for (var i = 0; i < extra.Count; i++)
-                {
-                    if (FindContributorZone(contributorZones, extra[i].Id) is { } hit)
+                    RequireRefreshCurrent(refreshOwner);
+                    var extra = contributor.BuildFrames(framesList.Count);
+                    RequireRefreshCurrent(refreshOwner);
+                    for (var i = 0; i < extra.Count; i++)
                     {
-                        var (seedU, seedV) = Nexus.Service.Lighting.Zones.ZoneResolution.DefaultUv(hit.Structure, hit.Zone);
-                        _contributorLayouts.Refresh(extra[i], settingsSnapshot,
-                            Nexus.Service.Lighting.Zones.ZoneResolution.ContextOf(hit.Structure, hit.Zone), seedU, seedV);
+                        if (FindContributorZone(contributorZones, extra[i].Id) is { } hit)
+                        {
+                            var (seedU, seedV) = Nexus.Service.Lighting.Zones.ZoneResolution.DefaultUv(hit.Structure, hit.Zone);
+                            _contributorLayouts.Refresh(extra[i], settingsSnapshot,
+                                Nexus.Service.Lighting.Zones.ZoneResolution.ContextOf(hit.Structure, hit.Zone), seedU, seedV);
+                        }
+                        else
+                        {
+                            _contributorLayouts.Refresh(extra[i], settingsSnapshot);
+                        }
+                        framesList.Add(extra[i]);
                     }
-                    else
-                    {
-                        _contributorLayouts.Refresh(extra[i], settingsSnapshot);
-                    }
-                    framesList.Add(extra[i]);
                 }
-            }
 
-            var frames = framesList.ToArray();
-            if (settingsSnapshot.MaximizedCanvasDefaults)
-            {
-                // Under the store lock: preset load and batch layouts Clear() and refill DeviceLayouts in place.
-                _store.Read(s => CanvasGridLayout.MaximizeUnplaced(frames, s.Lighting.DeviceLayouts));
-            }
-            var liveIds = new List<string>(frames.Length);
-            foreach (var f in frames) liveIds.Add(f.Id);
-            _contributorLayouts.Prune(liveIds);
-            _engine.UpdateDevices(frames);
+                var frames = framesList.ToArray();
+                if (settingsSnapshot.MaximizedCanvasDefaults)
+                {
+                    // Under the store lock: preset load and batch layouts Clear() and refill DeviceLayouts in place.
+                    _store.Read(s => CanvasGridLayout.MaximizeUnplaced(frames, s.Lighting.DeviceLayouts));
+                }
+                var liveIds = new List<string>(frames.Length);
+                foreach (var f in frames) liveIds.Add(f.Id);
+                _contributorLayouts.Prune(liveIds);
+                _engine.UpdateDevices(frames);
+                RequireRefreshCurrent(refreshOwner);
 
-            // The LED bit counts: a 0-LED device shows as an unavailable card until its LEDs arrive.
-            var setKeys = new string[frames.Length];
-            for (var i = 0; i < frames.Length; i++)
-            {
-                // The frame index rides in the key: clients map ids to frame bytes
-                // through it, so a reorder with the same ids must notify too.
-                setKeys[i] = (frames[i].LedCount > 0 ? frames[i].Id : frames[i].Id + "#0") + "@" + frames[i].Index;
-            }
-            Array.Sort(setKeys, StringComparer.Ordinal);
-            var signature = string.Join('\n', setKeys);
-            if (signature != _frameIdSignature)
-            {
-                _frameIdSignature = signature;
-                DeviceSetChanged?.Invoke();
-            }
+                // The LED bit counts: a 0-LED device shows as an unavailable card until its LEDs arrive.
+                var setKeys = new string[frames.Length];
+                for (var i = 0; i < frames.Length; i++)
+                {
+                    // The frame index rides in the key: clients map ids to frame bytes
+                    // through it, so a reorder with the same ids must notify too.
+                    setKeys[i] = (frames[i].LedCount > 0 ? frames[i].Id : frames[i].Id + "#0") + "@" + frames[i].Index;
+                }
+                Array.Sort(setKeys, StringComparer.Ordinal);
+                var signature = string.Join('\n', setKeys);
+                if (signature != _frameIdSignature)
+                {
+                    _frameIdSignature = signature;
+                    DeviceSetChanged?.Invoke();
+                    RequireRefreshCurrent(refreshOwner);
+                }
 
-            // Rebuild per-physical LED buffers sized to the OpenRGB device's full
-            // length. OnFrame writes each zone's slice into the corresponding offset
-            // and then pushes once per physical device.
-            SyncPhysicalBuffers(devices);
-            lock (_lock) { _metadataRetry.Complete(metadataScope); }
-            Interlocked.Exchange(ref _daemonFailures, 0);
+                // Rebuild per-physical LED buffers sized to the OpenRGB device's full
+                // length. OnFrame writes each zone's slice into the corresponding offset
+                // and then pushes once per physical device.
+                SyncPhysicalBuffers(devices);
+                lock (_lock) { _metadataRetry.Complete(metadataScope); }
+                Interlocked.Exchange(ref _daemonFailures, 0);
+            });
         }
+        catch (RefreshRetiredException) { /* Retired successful work has no current side effects. */ }
         finally
         {
             _refreshSemaphore.Release();
@@ -1913,14 +1963,14 @@ public sealed class RgbBridge : IDisposable
     /// Persist the exclusion delta computed from a settled device list, then
     /// re-detect with the rewritten denylist.
     /// </summary>
-    private void ReconcileDetectorExclusions(IReadOnlyList<RgbDevice> settledList, NexusSettings settingsSnapshot)
+    private void ReconcileDetectorExclusions(IReadOnlyList<RgbDevice> settledList, NexusSettings settingsSnapshot, RefreshOwner refreshOwner)
     {
         OpenRgbDetectorExclusions.Delta delta;
         try
         {
             // Reloaded per reconcile: the daemon rewrites the map whenever its
             // device list changes, including after this pass started.
-            var configDir = OpenRgbProcessManager.ResolveConfigDir();
+            var configDir = _proc.ConfigDirectory;
             var detectorMap = OpenRgbDetectorMap.Load(configDir);
             delta = OpenRgbDetectorExclusions.Compute(settledList, settingsSnapshot, detectorMap, OpenRgbDetectorExclusions.LoadRegisteredDetectors(configDir));
         }
@@ -1955,9 +2005,10 @@ public sealed class RgbBridge : IDisposable
         }
 
         _store.Update(s => OpenRgbDetectorExclusions.Apply(s, delta));
+        RequireRefreshCurrent(refreshOwner);
         ServiceLog.Info($"[rgb-bridge] detector exclusions changed (+{delta.Add.Count}/-{delta.Remove.Count}), applying");
         Interlocked.Exchange(ref _lastBounceTicks, DateTime.UtcNow.Ticks);
-        Redetect("detector-exclusions", detectorsChanged: true);
+        Redetect("detector-exclusions", detectorsChanged: true, refreshOwner);
     }
 
     /// <summary>True when this device's bytes differ from the last push, or the
@@ -2090,53 +2141,25 @@ public sealed class RgbBridge : IDisposable
     /// without the user configuring it first.
     /// Returns every resize sent, so the caller can re-fetch and report the outcome.
     /// </summary>
-    private async Task<List<ZoneResizeAttempt>> ApplyZoneResizesAsync(IReadOnlyList<RgbDevice> devices)
+    private async Task<List<ZoneResizeAttempt>> ApplyZoneResizesAsync(IReadOnlyList<RgbDevice> devices, RefreshOwner refreshOwner)
     {
         var attempts = new List<ZoneResizeAttempt>();
 
-        var drained = new List<PendingIdResize>();
-        while (_pendingIdZoneResizes.TryDequeue(out var byId))
+        StageQueuedResizes(refreshOwner, devices);
+        while (TrySelectQueuedResize(refreshOwner, devices, out var request, out var address))
         {
-            drained.Add(byId);
-        }
-        if (drained.Count > 0)
-        {
-            var resolved = new List<(int physIdx, int zoneIdx, int newSize)>();
-            var waiting = new List<PendingIdResize>();
-            var expired = new List<PendingIdResize>();
-            PartitionPendingResizes(devices, drained, DateTime.UtcNow.Ticks, resolved, waiting, expired);
-            var settings = _store.Load();
-            foreach (var r in resolved)
-            {
-                var target = FindDevice(devices, r.physIdx);
-                if (target is null || !IsSizableDevice(target, settings))
-                {
-                    ServiceLog.Warn($"[rgb-bridge] resize of controller {r.physIdx} zone {r.zoneIdx} dropped: the device is no longer sizable through OpenRGB");
-                    continue;
-                }
-                _pendingZoneResizes.Enqueue(r);
-            }
-            foreach (var w in waiting)
-            {
-                _pendingIdZoneResizes.Enqueue(w);
-            }
-            foreach (var e in expired)
-            {
-                ServiceLog.Warn($"[rgb-bridge] resize of {e.DeviceId} zone {e.ZoneIdx} to {e.NewSize} discarded: the device did not appear within {PendingResizeLifetime.TotalSeconds:0}s");
-            }
-        }
-
-        while (_pendingZoneResizes.TryDequeue(out var req))
-        {
-            var queued = DescribeZone(devices, req.physIdx, req.zoneIdx);
+            var queued = DescribeZone(devices, address, request.ZoneIdx);
             try
             {
-                await _controller.ResizeZoneAsync(req.physIdx, req.zoneIdx, req.newSize).ConfigureAwait(false);
-                attempts.Add(new ZoneResizeAttempt(req.physIdx, req.zoneIdx, queued.Name, queued.Current, req.newSize, "queued"));
+                await ResizeForRefreshAsync(refreshOwner, address, request.ZoneIdx, request.NewSize,
+                    () => AdmitQueuedResize(request)).ConfigureAwait(false);
+                attempts.Add(new ZoneResizeAttempt(address, request.ZoneIdx, queued.Name, queued.Current, request.NewSize, "queued"));
             }
+            catch (RefreshRetiredException) { throw; }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[rgb-bridge] queued resize dev={req.physIdx} zone={req.zoneIdx} -> {req.newSize} failed: {ex.Message}");
+                if (!OwnsRefreshScope(refreshOwner)) throw new RefreshRetiredException();
+                Console.Error.WriteLine($"[rgb-bridge] queued resize dev={address} zone={request.ZoneIdx} -> {request.NewSize} failed: {ex.Message}");
             }
         }
 
@@ -2162,11 +2185,13 @@ public sealed class RgbBridge : IDisposable
                     continue;
                 try
                 {
-                    await _controller.ResizeZoneAsync(d.Address, z, desired).ConfigureAwait(false);
+                    await ResizeForRefreshAsync(refreshOwner, d.Address, z, desired).ConfigureAwait(false);
                     attempts.Add(new ZoneResizeAttempt(d.Address, z, ZoneName(d.Zones[z], z), d.Zones[z].LedCount, desired, "persisted"));
                 }
+                catch (RefreshRetiredException) { throw; }
                 catch (Exception ex)
                 {
+                    if (!OwnsRefreshScope(refreshOwner)) throw new RefreshRetiredException();
                     Console.Error.WriteLine($"[rgb-bridge] apply persisted size {zoneId} -> {desired} failed: {ex.Message}");
                 }
             }
@@ -2198,23 +2223,25 @@ public sealed class RgbBridge : IDisposable
         }
         if (toDefault.Count > 0)
         {
-            _store.Update(s =>
+            if (!PublishRefresh(refreshOwner, () => _store.Update(s =>
             {
                 foreach (var t in toDefault)
                 {
                     s.Devices.ZoneLedCounts[t.id] = DefaultArgbZoneLedCount;
                 }
-            });
+            }))) throw new RefreshRetiredException();
             foreach (var t in toDefault)
             {
                 try
                 {
-                    await _controller.ResizeZoneAsync(t.physIdx, t.zoneIdx, DefaultArgbZoneLedCount).ConfigureAwait(false);
+                    await ResizeForRefreshAsync(refreshOwner, t.physIdx, t.zoneIdx, DefaultArgbZoneLedCount).ConfigureAwait(false);
                     var seeded = DescribeZone(devices, t.physIdx, t.zoneIdx);
                     attempts.Add(new ZoneResizeAttempt(t.physIdx, t.zoneIdx, seeded.Name, seeded.Current, DefaultArgbZoneLedCount, "default"));
                 }
+                catch (RefreshRetiredException) { throw; }
                 catch (Exception ex)
                 {
+                    if (!OwnsRefreshScope(refreshOwner)) throw new RefreshRetiredException();
                     Console.Error.WriteLine($"[rgb-bridge] default size {t.id} -> {DefaultArgbZoneLedCount} failed: {ex.Message}");
                 }
             }
@@ -2403,16 +2430,19 @@ public sealed class RgbBridge : IDisposable
         // A COMPLETE can be missed (session dropped mid-pass, or connected after it).
         string? deferred;
         bool deferredDetectors;
+        RefreshOwner? deferredOwner;
         lock (_lock)
         {
             deferred = _deferredRedetectReason;
             deferredDetectors = _deferredDetectorsChanged;
+            deferredOwner = _deferredRedetectOwner;
             _deferredRedetectReason = null;
             _deferredDetectorsChanged = false;
+            _deferredRedetectOwner = null;
         }
         if (deferred is not null && !OsShuttingDown())
         {
-            Redetect(deferred, deferredDetectors);
+            Redetect(deferred, deferredDetectors, deferredOwner);
             return;
         }
         // A full fetch holds the socket for one request per controller; waiting

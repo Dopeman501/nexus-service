@@ -149,4 +149,95 @@ public class Slv3LcdProtocolTests
         var header = Slv3LcdProtocol.BuildArgCommandHeader(Slv3LcdProtocol.CmdType.Rotate, 0x11223344, 2);
         Assert.Equal(512, header.Length);
     }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(1)]
+    [InlineData(127)]
+    [InlineData(101888)]
+    public void Destination_packet_matches_existing_complete_wire_bytes(int length)
+    {
+        var jpeg = new byte[length];
+        for (int i = 0; i < length; i++) jpeg[i] = (byte)(i * 31);
+        var expected = Slv3LcdProtocol.BuildPushJpgBuffer(0x11223344, jpeg);
+        var owned = new byte[102400];
+        Array.Fill(owned, (byte)0xA5);
+        Slv3LcdProtocol.WritePushJpgBuffer(0x11223344, jpeg, owned);
+        Assert.Equal(expected, owned);
+    }
+
+    [Fact]
+    public void Large_small_large_reuse_clears_every_byte_of_stale_padding()
+    {
+        var owned = new byte[102400];
+        foreach (int size in new[] { 101888, 1, 73728, 0 })
+        {
+            var jpeg = new byte[size];
+            Array.Fill(jpeg, (byte)0xDD);
+            Slv3LcdProtocol.WritePushJpgBuffer(23, jpeg, owned);
+            Assert.Equal(Slv3LcdProtocol.BuildPushJpgBuffer(23, jpeg), owned);
+            Assert.True(owned.AsSpan(512 + size).IndexOfAnyExcept((byte)0) < 0);
+        }
+    }
+
+    [Theory]
+    [InlineData(511, 0, 102400)]
+    [InlineData(513, 0, 102400)]
+    [InlineData(512, 101889, 102400)]
+    [InlineData(512, 0, 102399)]
+    [InlineData(512, 0, 102401)]
+    public void Invalid_transfer_shapes_are_rejected_before_modifying_destination(int headerLength, int jpegLength, int destinationLength)
+    {
+        var destination = new byte[destinationLength];
+        Array.Fill(destination, (byte)0x7E);
+        Assert.Throws<ArgumentException>(() => Slv3LcdProtocol.WriteTransferBuffer(new byte[headerLength], new byte[jpegLength], destination));
+        Assert.True(destination.AsSpan().IndexOfAnyExcept((byte)0x7E) < 0);
+    }
+
+    [Fact]
+    public void Transfer_formatting_allocates_zero_after_storage_is_owned()
+    {
+        var header = new byte[512];
+        var jpeg = new byte[4096];
+        var destination = new byte[102400];
+        Slv3LcdProtocol.WriteTransferBuffer(header, jpeg, destination);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 0; i < 2048; i++) Slv3LcdProtocol.WriteTransferBuffer(header, jpeg, destination);
+        Assert.Equal(0, GC.GetAllocatedBytesForCurrentThread() - before);
+    }
+
+    [Fact]
+    public void Allocating_builder_keeps_independent_packet_ownership()
+    {
+        var first = Slv3LcdProtocol.BuildPushJpgBuffer(7, [1, 2, 3]);
+        var next = Slv3LcdProtocol.BuildPushJpgBuffer(7, [1, 2, 3]);
+        Assert.NotSame(first, next);
+        first[512] = 99;
+        Assert.Equal(1, next[512]);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void Destination_aliasing_header_or_jpeg_is_rejected_before_any_mutation(bool headerAlias)
+    {
+        var destination = new byte[102400];
+        Array.Fill(destination, (byte)0xA5);
+        var before = destination.ToArray();
+        if (headerAlias)
+            Assert.Throws<ArgumentException>(() => Slv3LcdProtocol.WriteTransferBuffer(destination.AsSpan(0, 512), new byte[17], destination));
+        else
+            Assert.Throws<ArgumentException>(() => Slv3LcdProtocol.WriteTransferBuffer(new byte[512], destination.AsSpan(0, 17), destination));
+        Assert.Equal(before, destination);
+    }
+
+    [Fact]
+    public void Push_destination_aliasing_jpeg_is_rejected_before_any_mutation()
+    {
+        var destination = new byte[102400];
+        Array.Fill(destination, (byte)0x7E);
+        var before = destination.ToArray();
+        Assert.Throws<ArgumentException>(() => Slv3LcdProtocol.WritePushJpgBuffer(23, destination.AsSpan(0, 17), destination));
+        Assert.Equal(before, destination);
+    }
 }

@@ -1,5 +1,6 @@
 using System;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
@@ -7,6 +8,7 @@ using System.Runtime.Versioning;
 using System.Security.Principal;
 using System.Threading;
 using Nexus.Service.Platform;
+using Nexus.Service.Diagnostics;
 
 namespace Nexus.Service.Panel.Streams;
 
@@ -30,6 +32,9 @@ internal sealed unsafe partial class WindowsStreamFrameSection : IDisposable
     private readonly Thread _thread;
     private volatile bool _disposed;
     private long _lastSequence;
+    private SharedFrameReadDiagnostics? _diagnostics;
+    private long _diagnosticRevision;
+    private long _diagnosticFaultRevision;
 
     public string Name { get; }
 
@@ -160,6 +165,7 @@ internal sealed unsafe partial class WindowsStreamFrameSection : IDisposable
                 if (StreamFrameSection.TryRead(_view, _capacity, ref _lastSequence, buffer, out var length))
                 {
                     StreamFrameSection.PublishConsumed(_view, _lastSequence);
+                    ObserveDiagnosticRead(_lastSequence);
                     var handedOver = buffer;
                     buffer = null!;
                     _onFrame(handedOver, length);
@@ -176,6 +182,31 @@ internal sealed unsafe partial class WindowsStreamFrameSection : IDisposable
                     StreamFrame.Pool.Return(buffer);
                 }
             }
+        }
+    }
+
+    private void ObserveDiagnosticRead(long sequence)
+    {
+        var revision = EfficiencyDiagnosticOptions.SessionRevision;
+        if (revision == 0) { _diagnostics = null; _diagnosticRevision = 0; _diagnosticFaultRevision = 0; return; }
+        if (_diagnosticFaultRevision == revision) return;
+        try
+        {
+            var now = Stopwatch.GetTimestamp();
+            if (_diagnosticRevision != revision)
+            {
+                _diagnostics = new SharedFrameReadDiagnostics(Name, revision, Stopwatch.Frequency, now);
+                _diagnosticRevision = revision;
+            }
+            _diagnostics!.Observe(sequence);
+            var line = _diagnostics.Report(now);
+            if (line is not null && EfficiencyDiagnosticOptions.SessionRevision == revision) ServiceLog.Info(line);
+        }
+        catch (Exception)
+        {
+            // Optional scalar diagnostics must not reject or retain a frame.
+            _diagnostics = null; _diagnosticRevision = 0;
+            _diagnosticFaultRevision = revision;
         }
     }
 

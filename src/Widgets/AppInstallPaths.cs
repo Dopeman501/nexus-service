@@ -46,6 +46,9 @@ public static class AppInstallPaths
 
     private static string ResolveAppData()
     {
+#if OFFLINE_SMOKE
+        return Nexus.Service.Lifecycle.OfflineSmokeHost.DataRoot;
+#else
         if (Nexus.Service.Persistence.NexusDataPaths.SystemDaemonRoot is { } daemonRoot)
             return daemonRoot;
         if (OperatingSystem.IsWindows())
@@ -67,6 +70,7 @@ public static class AppInstallPaths
         if (!string.IsNullOrEmpty(xdg)) return Path.Combine(xdg, "Nexus");
         var linHome = Environment.GetEnvironmentVariable("HOME") ?? "";
         return string.IsNullOrEmpty(linHome) ? "" : Path.Combine(linHome, ".local", "share", "Nexus");
+#endif
     }
 
     /// <summary>
